@@ -1,4 +1,4 @@
-# Spectrum AI
+# Spectra
 
 Next-generation meeting intelligence and automated workspace platform.
 
@@ -7,7 +7,7 @@ Next-generation meeting intelligence and automated workspace platform.
 ## 📁 Repository Structure
 
 ```
-spectrum-ai/
+spectra/
 │
 ├── frontend/                       # SvelteKit + Vite + TypeScript
 │   ├── src/
@@ -71,7 +71,7 @@ npm run dev
 UI available at: `http://localhost:3000`
 
 ### 3. Python & AI Worker Tooling
-All Python services and scripts in Spectrum AI use [`uv`](https://docs.astral.sh/uv/):
+All Python services and scripts in Spectra AI use [`uv`](https://docs.astral.sh/uv/):
 ```bash
 # Install uv (if not installed)
 # pip install uv  OR  curl -LsSf https://astral.sh/uv/install.sh | sh
