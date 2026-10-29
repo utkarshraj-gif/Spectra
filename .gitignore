@@ -1,0 +1,36 @@
+# Environment files
+.env
+*.env.local
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Python / AI Service
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Media & recordings
+recordings/*
+!recordings/.gitkeep
+!recordings/.gitignore
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
