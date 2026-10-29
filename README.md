@@ -1,0 +1,2 @@
+# Sperctra
+Notetaker Assistant
