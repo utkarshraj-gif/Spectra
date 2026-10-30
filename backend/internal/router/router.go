@@ -1,59 +1,87 @@
+/*
+Package router configures the Gin HTTP engine, registers API routes,
+and attaches middleware for CORS, logging, and error recovery.
+
+Purpose:
+  - Establishes the public-facing REST API contract using Gin.
+  - Mounts health checks, meetings, calendar, google oauth, and graph endpoints.
+  - Supports dependency injection for hermetic unit and end-to-end testing.
+
+Key Types and Functions:
+  - RouterDeps (Struct)
+  - New(deps RouterDeps) *gin.Engine
+*/
 package router
 
 import (
-	"fmt"
 	"net/http"
-	"strings"
 
-	"spectrum-ai/backend/internal/auth"
+	"spectrum-ai/backend/internal/api"
 	"spectrum-ai/backend/internal/calendar"
+	"spectrum-ai/backend/internal/google"
+	"spectrum-ai/backend/internal/graph"
 	"spectrum-ai/backend/internal/meetings"
 	"spectrum-ai/backend/internal/middleware"
-	"spectrum-ai/backend/internal/participants"
-	"spectrum-ai/backend/internal/users"
+
+	"github.com/gin-gonic/gin"
 )
 
-func New() http.Handler {
-	mux := http.NewServeMux()
+// RouterDeps defines the required dependencies for assembling the Gin router.
+type RouterDeps struct {
+	MeetingService  *meetings.Service
+	CalendarHandler *calendar.Handler
+	GoogleHandler   *google.AuthHandler
+	GraphHandler    *graph.Handler
+	GinMode         string
+}
 
-	authH := auth.NewHandler()
-	userH := users.NewHandler()
-	meetH := meetings.NewHandler()
-	partH := participants.NewHandler()
-	calH := calendar.NewHandler()
+// New constructs and configures a Gin engine with all registered API routes.
+func New(deps RouterDeps) *gin.Engine {
+	if deps.GinMode != "" {
+		gin.SetMode(deps.GinMode)
+	}
 
-	// Health
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","service":"spectrum-backend"}`)
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+	engine.Use(middleware.Logger())
+	engine.Use(middleware.CORS())
+
+	// Health check endpoint
+	engine.GET("/health", func(c *gin.Context) {
+		api.RespondJSON(c, http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "spectra-backend",
+		})
 	})
 
-	// Auth routes
-	mux.HandleFunc("/api/v1/auth/login", authH.Login)
-	mux.HandleFunc("/api/v1/auth/register", authH.Register)
-
-	// Users routes
-	mux.HandleFunc("/api/v1/users/me", userH.GetProfile)
-
-	// Meetings routes
-	mux.HandleFunc("/api/v1/meetings", meetH.HandleMeetings)
-	mux.HandleFunc("/api/v1/meetings/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.URL.Path, "/api/v1/meetings/") == "" {
-			meetH.HandleMeetings(w, r)
-			return
+	// Public API route group
+	apiGroup := engine.Group("/api")
+	{
+		// Meetings endpoints
+		if deps.MeetingService != nil {
+			meetingHandler := meetings.NewHandler(deps.MeetingService)
+			meetingHandler.RegisterRoutes(apiGroup)
 		}
-		meetH.GetMeetingByID(w, r)
-	})
 
-	// Participants routes
-	mux.HandleFunc("/api/v1/participants", partH.List)
+		// Calendar endpoints
+		calHandler := deps.CalendarHandler
+		if calHandler == nil {
+			calHandler = calendar.NewHandler(nil)
+		}
+		calHandler.RegisterRoutes(apiGroup)
 
-	// Calendar routes
-	mux.HandleFunc("/api/v1/calendar/events", calH.ListEvents)
+		// Google OAuth endpoints
+		if deps.GoogleHandler != nil {
+			deps.GoogleHandler.RegisterRoutes(apiGroup)
+		}
 
-	// Wrap middlewares
-	handler := middleware.CORS(mux)
-	handler = middleware.Logger(handler)
+		// Graph endpoints (initially returns "not configured")
+		grHandler := deps.GraphHandler
+		if grHandler == nil {
+			grHandler = graph.NewHandler()
+		}
+		grHandler.RegisterRoutes(apiGroup)
+	}
 
-	return handler
+	return engine
 }
