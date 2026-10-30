@@ -75,8 +75,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Start Meeting Session
-  if (method === 'POST' && pathname === '/sessions/start') {
+  // Start Meeting Session (/sessions/start or /join for REST API client compatibility)
+  if (method === 'POST' && (pathname === '/sessions/start' || pathname === '/join')) {
     try {
       const payload = await parseJsonBody<StartSessionPayload>(req);
       if (!payload.meeting_id || !payload.meeting_url) {
@@ -106,7 +106,13 @@ const server = http.createServer(async (req, res) => {
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'initiated', meeting_id: payload.meeting_id }));
+      res.end(
+        JSON.stringify({
+          status: 'dispatched',
+          message: 'Worker successfully dispatched to Google Meet',
+          meeting_id: payload.meeting_id,
+        })
+      );
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: (err as Error).message }));
@@ -114,7 +120,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Stop Meeting Session
+  // Stop Meeting Session via REST path (/meetings/:id/stop)
+  if (method === 'POST' && pathname.startsWith('/meetings/') && pathname.endsWith('/stop')) {
+    const parts = pathname.split('/');
+    const meetingId = parts[2];
+    const session = sessions.get(meetingId);
+    if (!session) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No active session found for meeting_id' }));
+      return;
+    }
+
+    await session.leave('Requested by REST API');
+    sessions.delete(meetingId);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'stopped', meeting_id: meetingId }));
+    return;
+  }
+
+  // Stop Meeting Session via RPC path (/sessions/stop)
   if (method === 'POST' && pathname === '/sessions/stop') {
     try {
       const payload = await parseJsonBody<StopSessionPayload>(req);
