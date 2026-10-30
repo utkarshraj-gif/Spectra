@@ -1,8 +1,22 @@
 <script lang="ts">
-  const recentMeetings = [
-    { id: '1', title: 'Product Sync & Sprint Planning', date: 'Oct 29, 2026', duration: '45m', status: 'Completed' },
-    { id: '2', title: 'Architecture Review: Spectrum AI', date: 'Oct 28, 2026', duration: '30m', status: 'Processing' }
-  ];
+  import { onMount } from 'svelte';
+  import { listMeetings } from '$lib/api/client';
+  import type { Meeting } from '$lib/types';
+  import MeetingCard from '$lib/components/MeetingCard.svelte';
+
+  let meetings: Meeting[] = [];
+  let loading = true;
+  let error = '';
+
+  onMount(async () => {
+    try {
+      meetings = await listMeetings();
+    } catch (e: any) {
+      error = e.message || 'Failed to load meetings';
+    } finally {
+      loading = false;
+    }
+  });
 </script>
 
 <div class="dashboard">
@@ -11,20 +25,25 @@
     <a href="/meetings/new" class="btn primary">+ New Meeting</a>
   </div>
 
-  <section class="section">
-    <h2>Recent Meetings</h2>
-    <div class="card-list">
-      {#each recentMeetings as meeting}
-        <a href={`/meetings/${meeting.id}`} class="meeting-card">
-          <div class="info">
-            <h3>{meeting.title}</h3>
-            <p>{meeting.date} • {meeting.duration}</p>
-          </div>
-          <span class="badge {meeting.status.toLowerCase()}">{meeting.status}</span>
-        </a>
-      {/each}
+  {#if loading}
+    <p class="muted">Loading meetings…</p>
+  {:else if error}
+    <div class="error">{error}</div>
+  {:else if meetings.length === 0}
+    <div class="empty">
+      <p>No meetings yet.</p>
+      <a href="/meetings/new" class="btn primary">Start your first meeting</a>
     </div>
-  </section>
+  {:else}
+    <section class="section">
+      <h2>Recent Meetings</h2>
+      <div class="card-list">
+        {#each meetings as meeting}
+          <MeetingCard {meeting} />
+        {/each}
+      </div>
+    </section>
+  {/if}
 </div>
 
 <style>
@@ -42,29 +61,17 @@
     border-radius: 6px;
     font-weight: 600;
   }
-  .meeting-card {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: #1e293b;
-    border: 1px solid #334155;
-    padding: 1.25rem;
+  .muted { color: #94a3b8; }
+  .error {
+    background: #7f1d1d;
+    color: #fca5a5;
+    padding: 1rem;
     border-radius: 8px;
-    margin-bottom: 1rem;
-    text-decoration: none;
-    color: inherit;
   }
-  .meeting-card:hover {
-    border-color: #60a5fa;
+  .empty {
+    text-align: center;
+    padding: 3rem;
+    color: #94a3b8;
   }
-  h3 { margin: 0 0 0.25rem 0; font-size: 1.1rem; }
-  p { margin: 0; color: #94a3b8; font-size: 0.875rem; }
-  .badge {
-    padding: 0.25rem 0.75rem;
-    border-radius: 9999px;
-    font-size: 0.75rem;
-    font-weight: 600;
-  }
-  .badge.completed { background: #065f46; color: #34d399; }
-  .badge.processing { background: #854d0e; color: #fde047; }
+  h2 { margin-bottom: 1rem; }
 </style>
