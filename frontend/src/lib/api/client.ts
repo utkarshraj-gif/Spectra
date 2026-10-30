@@ -19,5 +19,38 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     throw new Error(`API Error ${response.status}: ${errorBody}`);
   }
 
+  // handle empty responses
+  if (response.status === 204) {
+    return {} as T;
+  }
+
   return response.json();
+}
+
+// ---------- Meetings ----------
+import type { Meeting, TranscriptSegment } from '$lib/types';
+
+export async function createMeeting(data: { title: string; meeting_url: string }) {
+  return apiRequest<Meeting>('/api/v1/meetings', {
+    method: 'POST',
+    body: JSON.stringify(data)
+  });
+}
+
+export async function listMeetings() {
+  return apiRequest<Meeting[]>('/api/v1/meetings');
+}
+
+export async function getMeeting(id: string) {
+  return apiRequest<Meeting>(`/api/v1/meetings/${id}`);
+}
+
+export async function getTranscript(id: string) {
+  return apiRequest<TranscriptSegment[]>(`/api/v1/meetings/${id}/transcript`);
+}
+
+export async function stopMeeting(id: string) {
+  return apiRequest<Meeting>(`/api/v1/meetings/${id}/stop`, {
+    method: 'POST'
+  });
 }

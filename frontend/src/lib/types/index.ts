@@ -5,13 +5,31 @@ export interface User {
   created_at?: string;
 }
 
+export type MeetingStatus =
+  | 'queued'
+  | 'starting'
+  | 'waiting_for_admission'
+  | 'joined'
+  | 'recording'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'scheduled'      // legacy
+  | 'in_progress';   // legacy
+
 export interface Meeting {
   id: string;
   title: string;
   meeting_url: string;
-  status: 'scheduled' | 'in_progress' | 'processing' | 'completed' | 'failed';
+  status: MeetingStatus;
+  calendar_event_id?: string | null;
+  audio_path?: string | null;
+  error_message?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
   created_at: string;
-  updated_at: string;
+  updated_at?: string;
 }
 
 export interface Participant {
@@ -23,8 +41,12 @@ export interface Participant {
 
 export interface TranscriptSegment {
   id: string;
-  speaker: string;
-  start_time: number;
-  end_time: number;
+  meeting_id?: string;
+  start_seconds: number;
+  end_seconds: number;
   text: string;
+  speaker_id?: string | null;
+  language?: string | null;
+  model_name?: string | null;
+  created_at?: string;
 }
