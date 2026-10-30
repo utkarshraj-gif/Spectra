@@ -34,3 +34,7 @@ recordings/*
 Thumbs.db
 .vscode/
 .idea/
+
+# Local docs & agent guidelines
+docs/AGENTS.md
+docs/RULES.md
