@@ -35,6 +35,7 @@ const GOOGLE_JOIN_BUTTON_SELECTORS = [
   '//button[.//span[text()="Ask to join"]]',
   'button:has-text("Ask to join")',
   'button:has-text("Join now")',
+  'button:has-text("Switch here")',
   'button:has-text("Join")',
   'button[jsname]:not([aria-label]):has(span)',
 ];
