@@ -14,9 +14,12 @@
 
   let pollInterval: ReturnType<typeof setInterval>;
 
-  $: meetingId = $page.params.id;
+  // Guaranteed to be string inside this route
+  $: meetingId = $page.params.id as string;
 
   async function load() {
+    if (!meetingId) return;
+
     try {
       meeting = await getMeeting(meetingId);
       if (['completed', 'processing', 'recording'].includes(meeting.status)) {
