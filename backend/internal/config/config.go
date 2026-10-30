@@ -1,41 +1,57 @@
+/*
+Package config handles environment configuration loading and defaults for the backend service.
+
+Purpose:
+  - Loads application configuration values from environment variables with sensible defaults.
+  - Supports configurations for server port, worker service URL, default bot identity, and Google OAuth credentials.
+
+Key Types and Functions:
+  - Config (Struct)
+  - Load() *Config
+*/
 package config
 
 import (
 	"os"
 )
 
+// Config encapsulates backend service configuration values.
 type Config struct {
-	Port         string
-	DatabaseURL  string
-	AIServiceURL string
-	JWTSecret    string
+	Port               string
+	GinMode            string
+	WorkerServiceURL   string
+	DefaultBotName     string
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURL  string
 }
 
+// Load reads configuration values from the OS environment, applying production-safe defaults.
 func Load() *Config {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://postgres:postgres@localhost:5432/spectra?sslmode=disable"
+	ginMode := os.Getenv("GIN_MODE")
+	if ginMode == "" {
+		ginMode = "release"
 	}
 
-	aiURL := os.Getenv("AI_SERVICE_URL")
-	if aiURL == "" {
-		aiURL = "http://localhost:8000"
-	}
+	workerURL := os.Getenv("WORKER_SERVICE_URL")
 
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		jwtSecret = "super-secret-key-change-in-prod"
+	botName := os.Getenv("DEFAULT_BOT_NAME")
+	if botName == "" {
+		botName = "Spectra Bot"
 	}
 
 	return &Config{
-		Port:         port,
-		DatabaseURL:  dbURL,
-		AIServiceURL: aiURL,
-		JWTSecret:    jwtSecret,
+		Port:               port,
+		GinMode:            ginMode,
+		WorkerServiceURL:   workerURL,
+		DefaultBotName:     botName,
+		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:  os.Getenv("GOOGLE_REDIRECT_URL"),
 	}
 }
