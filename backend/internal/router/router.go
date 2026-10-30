@@ -4,7 +4,7 @@ and attaches middleware for CORS, logging, and error recovery.
 
 Purpose:
   - Establishes the public-facing REST API contract using Gin.
-  - Mounts health checks, meetings, calendar, and graph endpoints.
+  - Mounts health checks, meetings, calendar, google oauth, and graph endpoints.
   - Supports dependency injection for hermetic unit and end-to-end testing.
 
 Key Types and Functions:
@@ -18,6 +18,7 @@ import (
 
 	"spectrum-ai/backend/internal/api"
 	"spectrum-ai/backend/internal/calendar"
+	"spectrum-ai/backend/internal/google"
 	"spectrum-ai/backend/internal/graph"
 	"spectrum-ai/backend/internal/meetings"
 	"spectrum-ai/backend/internal/middleware"
@@ -29,6 +30,7 @@ import (
 type RouterDeps struct {
 	MeetingService  *meetings.Service
 	CalendarHandler *calendar.Handler
+	GoogleHandler   *google.AuthHandler
 	GraphHandler    *graph.Handler
 	GinMode         string
 }
@@ -61,12 +63,17 @@ func New(deps RouterDeps) *gin.Engine {
 			meetingHandler.RegisterRoutes(apiGroup)
 		}
 
-		// Calendar endpoints (initially returns "not configured")
+		// Calendar endpoints
 		calHandler := deps.CalendarHandler
 		if calHandler == nil {
-			calHandler = calendar.NewHandler()
+			calHandler = calendar.NewHandler(nil)
 		}
 		calHandler.RegisterRoutes(apiGroup)
+
+		// Google OAuth endpoints
+		if deps.GoogleHandler != nil {
+			deps.GoogleHandler.RegisterRoutes(apiGroup)
+		}
 
 		// Graph endpoints (initially returns "not configured")
 		grHandler := deps.GraphHandler
