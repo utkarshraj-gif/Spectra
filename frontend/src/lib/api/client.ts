@@ -1,3 +1,5 @@
+import type { Meeting, TranscriptSegment } from '$lib/types';
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -28,7 +30,6 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
 }
 
 // ---------- Meetings ----------
-import type { Meeting, TranscriptSegment } from '$lib/types';
 
 export async function createMeeting(data: { title: string; meeting_url: string }) {
   return apiRequest<Meeting>('/api/v1/meetings', {
