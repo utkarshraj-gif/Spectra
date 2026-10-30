@@ -5,10 +5,11 @@ import (
 )
 
 type Config struct {
-	Port         string
-	DatabaseURL  string
-	AIServiceURL string
-	JWTSecret    string
+	Port             string
+	DatabaseURL      string
+	AIServiceURL     string
+	WorkerServiceURL string
+	JWTSecret        string
 }
 
 func Load() *Config {
@@ -27,15 +28,21 @@ func Load() *Config {
 		aiURL = "http://localhost:8000"
 	}
 
+	workerURL := os.Getenv("WORKER_SERVICE_URL")
+	if workerURL == "" {
+		workerURL = "http://localhost:5001"
+	}
+
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		jwtSecret = "super-secret-key-change-in-prod"
 	}
 
 	return &Config{
-		Port:         port,
-		DatabaseURL:  dbURL,
-		AIServiceURL: aiURL,
-		JWTSecret:    jwtSecret,
+		Port:             port,
+		DatabaseURL:      dbURL,
+		AIServiceURL:     aiURL,
+		WorkerServiceURL: workerURL,
+		JWTSecret:        jwtSecret,
 	}
 }
