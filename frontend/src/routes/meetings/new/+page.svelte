@@ -1,28 +1,58 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
+  import { createMeeting } from '$lib/api/client';
+
   let title = '';
   let meetingUrl = '';
-  let botName = 'Spectrum Bot';
+  let loading = false;
+  let error = '';
 
-  function scheduleMeeting() {
-    console.log('Scheduling meeting bot:', { title, meetingUrl, botName });
+  async function handleSubmit() {
+    error = '';
+    loading = true;
+    try {
+      const meeting = await createMeeting({
+        title: title || 'Untitled Meeting',
+        meeting_url: meetingUrl
+      });
+      goto(`/meetings/${meeting.id}`);
+    } catch (e: any) {
+      error = e.message || 'Failed to create meeting';
+    } finally {
+      loading = false;
+    }
   }
 </script>
 
 <div class="form-container">
   <h1>Join / Schedule Meeting</h1>
-  <p class="subtitle">Deploy the Spectrum AI bot to record, transcribe, and summarize your meeting.</p>
+  <p class="subtitle">Paste a Google Meet URL and deploy the Spectrum bot.</p>
 
-  <form on:submit|preventDefault={scheduleMeeting}>
-    <label for="title">Meeting Title</label>
-    <input id="title" type="text" bind:value={title} placeholder="e.g. Q4 Strategy Review" required />
+  {#if error}
+    <div class="error">{error}</div>
+  {/if}
 
-    <label for="url">Meeting URL (Google Meet, Zoom, Teams)</label>
-    <input id="url" type="url" bind:value={meetingUrl} placeholder="https://meet.google.com/xyz-abc" required />
+  <form on:submit|preventDefault={handleSubmit}>
+    <label for="title">Meeting Title (optional)</label>
+    <input
+      id="title"
+      type="text"
+      bind:value={title}
+      placeholder="e.g. Q4 Strategy Review"
+    />
 
-    <label for="bot">Bot Display Name</label>
-    <input id="bot" type="text" bind:value={botName} />
+    <label for="url">Google Meet URL *</label>
+    <input
+      id="url"
+      type="url"
+      bind:value={meetingUrl}
+      placeholder="https://meet.google.com/xyz-abc-def"
+      required
+    />
 
-    <button type="submit" class="btn primary">Send Bot to Meeting</button>
+    <button type="submit" class="btn primary" disabled={loading}>
+      {loading ? 'Starting bot…' : 'Send Bot to Meeting'}
+    </button>
   </form>
 </div>
 
@@ -37,7 +67,12 @@
   }
   h1 { margin-top: 0; margin-bottom: 0.5rem; }
   .subtitle { color: #94a3b8; margin-bottom: 2rem; }
-  label { display: block; font-size: 0.875rem; margin-bottom: 0.5rem; color: #94a3b8; }
+  label {
+    display: block;
+    font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+    color: #94a3b8;
+  }
   input {
     width: 100%;
     padding: 0.75rem;
@@ -57,5 +92,17 @@
     border: none;
     border-radius: 6px;
     cursor: pointer;
+  }
+  .btn.primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .error {
+    background: #7f1d1d;
+    color: #fca5a5;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
   }
 </style>
