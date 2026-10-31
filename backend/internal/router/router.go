@@ -54,9 +54,13 @@ func New(deps RouterDeps) *gin.Engine {
 		})
 	})
 
-	// Public API route group
-	apiGroup := engine.Group("/api")
-	{
+	// Register routes on both /api and /api/v1 for frontend compatibility.
+	apiGroups := []*gin.RouterGroup{
+		engine.Group("/api"),
+		engine.Group("/api/v1"),
+	}
+
+	for _, apiGroup := range apiGroups {
 		// Meetings endpoints
 		if deps.MeetingService != nil {
 			meetingHandler := meetings.NewHandler(deps.MeetingService)
@@ -75,7 +79,7 @@ func New(deps RouterDeps) *gin.Engine {
 			deps.GoogleHandler.RegisterRoutes(apiGroup)
 		}
 
-		// Graph endpoints (initially returns "not configured")
+		// Graph endpoints
 		grHandler := deps.GraphHandler
 		if grHandler == nil {
 			grHandler = graph.NewHandler()

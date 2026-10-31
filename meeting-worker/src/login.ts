@@ -9,7 +9,7 @@ async function loginProvision() {
   // Force headed mode for login
   process.env.HEADLESS = 'false';
 
-  const { context, profileDir } = await createMeetingContext('login-session');
+  const { context, profileDir } = await createMeetingContext('login-session', { headless: false });
   const page = context.pages()[0] || (await context.newPage());
 
   console.log(`Persistent Profile Directory: ${profileDir}`);

@@ -46,8 +46,18 @@ export async function getMeeting(id: string) {
   return apiRequest<Meeting>(`/api/v1/meetings/${id}`);
 }
 
-export async function getTranscript(id: string) {
-  return apiRequest<TranscriptSegment[]>(`/api/v1/meetings/${id}/transcript`);
+export interface TranscriptResponse {
+  meeting_id: string;
+  total: number;
+  segments: TranscriptSegment[];
+}
+
+export async function getTranscript(id: string): Promise<TranscriptSegment[]> {
+  const res = await apiRequest<TranscriptSegment[] | TranscriptResponse>(`/api/v1/meetings/${id}/transcript`);
+  if (Array.isArray(res)) {
+    return res;
+  }
+  return res.segments || [];
 }
 
 export async function stopMeeting(id: string) {
