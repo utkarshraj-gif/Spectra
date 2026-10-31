@@ -1,66 +1,89 @@
 <script lang="ts">
-  import { authUser } from '$lib/stores/auth';
+  import { theme } from '$lib/stores/theme';
+  import { Sun, Moon, Sparkles } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+
+  onMount(() => theme.init());
 </script>
 
-<nav class="navbar">
-  <div class="brand">
-    <a href="/" class="logo">Spectrum AI</a>
+<header class="nav">
+  <div class="container nav-inner">
+    <a href="/" class="logo">
+      <Sparkles size={22} />
+      <span>Spectra</span>
+    </a>
+
+    <nav class="links">
+      <a href="/#how">How It Works</a>
+      <a href="/#pricing">Pricing</a>
+      <a href="/#faq">FAQ</a>
+    </nav>
+
+    <div class="actions">
+      <button class="theme-btn" on:click={() => theme.toggle()} aria-label="Toggle theme">
+        {#if $theme === 'light'}
+          <Moon size={18} />
+        {:else}
+          <Sun size={18} />
+        {/if}
+      </button>
+      <a href="/login" class="btn btn-outline">Log in</a>
+      <a href="/register" class="btn btn-primary">Sign Up</a>
+    </div>
   </div>
-  <div class="nav-links">
-    {#if $authUser}
-      <a href="/dashboard">Dashboard</a>
-      <a href="/meetings/new">New Meeting</a>
-      <a href="/settings">Settings</a>
-      <button class="logout-btn" on:click={() => authUser.set(null)}>Logout</button>
-    {:else}
-      <a href="/dashboard">Dashboard</a>
-      <a href="/login">Login</a>
-      <a href="/register" class="register-pill">Register</a>
-    {/if}
-  </div>
-</nav>
+</header>
 
 <style>
-  .navbar {
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 1rem 2rem;
-    background: #0f172a;
-    border-bottom: 1px solid #1e293b;
+    justify-content: space-between;
+    height: 64px;
   }
   .logo {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #60a5fa;
-    text-decoration: none;
-  }
-  .nav-links {
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    gap: 0.5rem;
+    font-weight: 700;
+    font-size: 1.25rem;
   }
-  .nav-links a {
-    color: #94a3b8;
-    text-decoration: none;
+  .links {
+    display: flex;
+    gap: 2rem;
+  }
+  .links a {
     font-size: 0.95rem;
+    color: var(--text-muted);
     font-weight: 500;
   }
-  .nav-links a:hover {
-    color: #f1f5f9;
+  .links a:hover {
+    color: var(--text);
   }
-  .register-pill {
-    background: #3b82f6;
-    color: white !important;
-    padding: 0.4rem 0.9rem;
-    border-radius: 6px;
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
   }
-  .logout-btn {
+  .theme-btn {
     background: transparent;
-    border: 1px solid #334155;
-    color: #cbd5e1;
-    padding: 0.4rem 0.8rem;
-    border-radius: 6px;
-    cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text);
+  }
+  @media (max-width: 768px) {
+    .links { display: none; }
   }
 </style>
