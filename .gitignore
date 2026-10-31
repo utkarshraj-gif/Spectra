@@ -8,6 +8,10 @@ dist/
 dist-ssr/
 *.local
 
+# SvelteKit generated (never commit)
+frontend/.svelte-kit/
+.svelte-kit/
+
 # Go
 bin/
 *.exe
@@ -38,10 +42,13 @@ Thumbs.db
 # Local docs & agent guidelines
 docs/AGENTS.md
 docs/RULES.md
+RESPONSIBILITIES.md
+docs/RESPONSIBILITIES.md
 
-# SvelteKit generated
-frontend/.svelte-kit/
-.svelte-kit/
+# Reference projects
+vexa/
+vexa
 
-# Lock files (optional – many teams commit package-lock.json)
-# package-lock.json
+# Bot persistent profiles
+bot-profile/
+.chrome-profile/

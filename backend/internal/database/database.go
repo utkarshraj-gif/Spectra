@@ -1,3 +1,14 @@
+/*
+Package database outlines the database connection structure.
+
+Purpose:
+  - Serves as the placeholder connection wrapper for Mahi's Phase 4 PostgreSQL implementation.
+
+Key Types and Functions:
+  - DB (Struct)
+  - Connect(databaseURL string) (*DB, error)
+  - Ping() error
+*/
 package database
 
 import (
@@ -12,8 +23,6 @@ type DB struct {
 
 func Connect(databaseURL string) (*DB, error) {
 	log.Printf("Connecting to database at %s...", databaseURL)
-	// Database connection initialization
-	// In production, register pgx or pq driver
 	return &DB{}, nil
 }
 

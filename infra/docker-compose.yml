@@ -20,11 +20,27 @@ services:
     environment:
       - PORT=8080
       - DATABASE_URL=postgres://postgres:postgres@db:5432/spectra?sslmode=disable
+      - WORKER_SERVICE_URL=http://meeting-worker:5001
       - AI_SERVICE_URL=http://ai-service:8000
     depends_on:
       - db
+      - meeting-worker
 
-  # Python AI & Meeting Worker (Managed with uv)
+  # Meeting Worker (Playwright Headless Chromium)
+  meeting-worker:
+    build:
+      context: ../meeting-worker
+      dockerfile: Dockerfile
+    ports:
+      - "5001:5001"
+    shm_size: '2gb' # Required for Chromium WebRTC stability
+    environment:
+      - PORT=5001
+      - RECORDINGS_PATH=/app/recordings
+    volumes:
+      - ../recordings:/app/recordings
+
+  # Python AI Service (Managed with uv - Phase 3)
   # ai-service:
   #   build:
   #     context: ../ai-service
