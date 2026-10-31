@@ -38,3 +38,10 @@ Thumbs.db
 # Local docs & agent guidelines
 docs/AGENTS.md
 docs/RULES.md
+
+# SvelteKit generated
+frontend/.svelte-kit/
+.svelte-kit/
+
+# Lock files (optional – many teams commit package-lock.json)
+# package-lock.json
