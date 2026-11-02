@@ -131,11 +131,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    await session.leave('Requested by REST API');
     sessions.delete(meetingId);
-
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'stopped', meeting_id: meetingId }));
+
+    session.leave('Requested by REST API').catch((err) => {
+      console.error(`[MeetingWorker] Error stopping session ${meetingId}:`, err);
+    });
     return;
   }
 
@@ -156,11 +158,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      await session.leave(payload.reason || 'Requested by Go supervisor');
       sessions.delete(payload.meeting_id);
-
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'stopped', meeting_id: payload.meeting_id }));
+
+      session.leave(payload.reason || 'Requested by Go supervisor').catch((err) => {
+        console.error(`[MeetingWorker] Error stopping session ${payload.meeting_id}:`, err);
+      });
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: (err as Error).message }));

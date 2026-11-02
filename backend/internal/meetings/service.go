@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -247,9 +248,9 @@ func (s *Service) StopMeeting(ctx context.Context, id string) (*Meeting, error) 
 		return nil, fmt.Errorf("%w: meeting %s has status '%s'", ErrMeetingAlreadyStopped, id, meeting.Status)
 	}
 
-	// Signal the worker to leave the meeting
+	// Signal the worker to leave the meeting (warn on error, do not fail user stop request)
 	if err := s.worker.StopMeeting(ctx, id); err != nil {
-		return nil, fmt.Errorf("failed to stop worker: %w", err)
+		log.Printf("[MeetingService] Worker stop warning for %s: %v", id, err)
 	}
 
 	now := time.Now().UTC()

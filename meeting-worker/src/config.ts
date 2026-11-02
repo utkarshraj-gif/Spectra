@@ -8,5 +8,5 @@ export const config = {
   admissionTimeoutMs: parseInt(process.env.ADMISSION_TIMEOUT_MS || '300000', 10), // 5 minutes
   soloMeetingTimeoutMs: parseInt(process.env.SOLO_TIMEOUT_MS || '60000', 10), // 1 minute alone
   navigationTimeoutMs: parseInt(process.env.NAVIGATION_TIMEOUT_MS || '45000', 10), // 45 seconds
-  aiServiceWsUrl: process.env.AI_SERVICE_WS_URL || 'ws://127.0.0.1:5002',
+  aiServiceWsUrl: process.env.AI_SERVICE_WS_URL || 'ws://127.0.0.1:8000',
 };

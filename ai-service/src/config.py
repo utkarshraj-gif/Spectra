@@ -2,6 +2,11 @@ import os
 from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
+default_recordings = os.getenv(
+    "RECORDINGS_PATH",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "recordings")),
+)
+
 class Settings(BaseSettings):
     model_config = ConfigDict(extra="ignore", env_file=".env")
 
@@ -10,7 +15,7 @@ class Settings(BaseSettings):
     whisper_model: str = os.getenv("WHISPER_MODEL", "base")
     whisper_device: str = os.getenv("WHISPER_DEVICE", "cpu")
     whisper_compute_type: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
-    recordings_path: str = os.getenv("RECORDINGS_PATH", "/app/recordings")
+    recordings_path: str = default_recordings
     max_upload_size_mb: int = 500
 
 settings = Settings()
