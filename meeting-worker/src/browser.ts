@@ -7,15 +7,15 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { config } from './config.js';
 
-// Configure stealth evasions exactly as verified in Vexa (Pack F / issue #856)
+// Configure stealth evasions for Google Meet bot automation
 const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('iframe.contentWindow');
 stealth.enabledEvasions.delete('media.codecs');
 stealth.enabledEvasions.delete('user-agent-override');
 chromium.use(stealth);
 
-// Canonical browser args ported from Vexa's core/meetings/modules/join/src/browser-args.ts
-export const VEXA_JOIN_BROWSER_ARGS: readonly string[] = [
+// Canonical browser args for Google Meet stealth join
+export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
   '--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor',
@@ -33,7 +33,7 @@ export const VEXA_JOIN_BROWSER_ARGS: readonly string[] = [
 ];
 
 export async function createMeetingContext(meetingId: string): Promise<{ context: BrowserContext; profileDir: string }> {
-  // Durable persistent profile directory (matching Vexa's durable session pattern)
+  // Durable persistent profile directory for browser session state
   const profileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
   if (!fs.existsSync(profileDir)) {
     fs.mkdirSync(profileDir, { recursive: true });
@@ -42,7 +42,7 @@ export async function createMeetingContext(meetingId: string): Promise<{ context
   const baseOptions = {
     headless: config.headless,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: [...VEXA_JOIN_BROWSER_ARGS],
+    args: [...SPECTRA_JOIN_BROWSER_ARGS],
     permissions: ['microphone', 'camera'] as string[],
     viewport: { width: 1280, height: 720 },
     locale: 'en-US',
