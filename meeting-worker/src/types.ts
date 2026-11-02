@@ -21,11 +21,10 @@ export interface StopSessionPayload {
 }
 
 export interface SessionStatusEvent {
-  event: 'STATE_CHANGE' | 'HEARTBEAT' | 'ERROR' | 'LOG';
+  event: 'STATE_CHANGE' | 'HEARTBEAT' | 'ERROR' | 'LOG' | 'AUDIO_READY';
   meeting_id: string;
   state: MeetingState;
   timestamp: number;
   message?: string;
   details?: Record<string, unknown>;
 }
-

@@ -20,10 +20,15 @@ services:
     environment:
       - PORT=8080
       - DATABASE_URL=postgres://postgres:postgres@db:5432/spectra?sslmode=disable
-      - WORKER_SERVICE_URL=http://host.docker.internal:5001
+      - WORKER_SERVICE_URL=${WORKER_SERVICE_URL:-http://meeting-worker:5001}
       - AI_SERVICE_URL=http://ai-service:8000
+      - RECORDINGS_PATH=/app/recordings
+    volumes:
+      - ../recordings:/app/recordings
     depends_on:
       - db
+      - meeting-worker
+      - ai-service
 
   # Meeting Worker (Playwright Headless Chromium)
   meeting-worker:
@@ -40,17 +45,23 @@ services:
       - ../recordings:/app/recordings
       - ../meeting-worker/bot-profile:/app/bot-profile
 
-  # Python AI Service (Managed with uv - Phase 3)
-  # ai-service:
-  #   build:
-  #     context: ../ai-service
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "8000:8000"
-  #   environment:
-  #     - PORT=8000
-  #   depends_on:
-  #     - db
+  # Python AI Service (Faster-Whisper STT - Phase 3)
+  ai-service:
+    build:
+      context: ../ai-service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - RECORDINGS_PATH=/app/recordings
+      - WHISPER_MODEL=base
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
+    volumes:
+      - ../recordings:/app/recordings
+    depends_on:
+      - db
 
   db:
     image: postgres:16-alpine

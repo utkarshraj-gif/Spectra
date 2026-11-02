@@ -8,6 +8,10 @@ dist/
 dist-ssr/
 *.local
 
+# SvelteKit generated (never commit)
+frontend/.svelte-kit/
+.svelte-kit/
+
 # Go
 bin/
 *.exe
@@ -41,13 +45,8 @@ docs/RULES.md
 RESPONSIBILITIES.md
 docs/RESPONSIBILITIES.md
 
-# Reference projects
-vexa/
-vexa
-
 # Bot persistent profiles
 bot-profile/
 .chrome-profile/
-
 meeting-worker/recordings/
 meeting-worker/bot-profile/

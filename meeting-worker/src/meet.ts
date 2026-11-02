@@ -2,8 +2,9 @@ import { BrowserContext, Page } from 'playwright';
 import { createMeetingContext, cleanupProfileDir } from './browser.js';
 import { config } from './config.js';
 import { MeetingState, SessionStatusEvent } from './types.js';
+import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile } from './audio/index.js';
 
-// Vexa-aligned URL normalizer with pinned locale (?hl=en)
+// URL normalizer with pinned locale (?hl=en)
 function withPinnedMeetLocale(rawUrl: string): string {
   let cleaned = rawUrl.trim();
   if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
@@ -22,7 +23,7 @@ function withPinnedMeetLocale(rawUrl: string): string {
   return cleaned.includes('?') ? `${cleaned}&hl=en` : `${cleaned}?hl=en`;
 }
 
-// Selectors directly ported from Vexa's core/meetings/modules/join/src/googlemeet/selectors.ts
+// Selectors for Google Meet pre-join and lobby elements
 const GOOGLE_NAME_INPUT_SELECTORS = [
   'input[jsname][type="text"]',
   'input[type="text"]:not([aria-hidden="true"])',
@@ -89,6 +90,7 @@ export class GoogleMeetSession {
   private state: MeetingState = 'INITIALIZING';
   private onEventCallback: (event: SessionStatusEvent) => void;
   private monitorInterval: NodeJS.Timeout | null = null;
+  private audioCaptureSession: AudioCaptureSession | null = null;
   private isDestroyed = false;
 
   constructor(
@@ -250,12 +252,13 @@ export class GoogleMeetSession {
           if (await el.isVisible()) {
             this.transitionTo('IN_MEETING', 'Bot successfully admitted to meeting room');
             this.startInMeetingMonitor();
+            this.startAudioCapture();
             return;
           }
         } catch {}
       }
 
-      // Check 2: Waiting Room Indicators (Vexa-aligned: "Asking to be let in")
+      // Check 2: Waiting Room Indicators ("Asking to be let in")
       for (const sel of GOOGLE_WAITING_INDICATORS) {
         const el = this.page.locator(sel).first();
         try {
@@ -325,6 +328,26 @@ export class GoogleMeetSession {
     }
   }
 
+  private async startAudioCapture(): Promise<void> {
+    if (!this.page || this.audioCaptureSession) return;
+    try {
+      this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
+        meetingId: this.meetingId,
+        silenceThreshold: 0.003,
+      });
+      this.onEventCallback({
+        event: 'LOG',
+        meeting_id: this.meetingId,
+        state: this.state,
+        timestamp: Date.now(),
+        message: 'AudioWorklet active: streaming 16kHz Linear PCM',
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[GoogleMeetSession] Failed to initialize audio capture: ${msg}`);
+    }
+  }
+
   public async leave(reason = 'User requested stop'): Promise<void> {
     if (this.isDestroyed) return;
     this.transitionTo('LEAVING', reason);
@@ -348,6 +371,40 @@ export class GoogleMeetSession {
     if (this.isDestroyed) return;
     this.isDestroyed = true;
     this.stopMonitoring();
+
+    if (this.audioCaptureSession) {
+      try {
+        const savedPath = await this.audioCaptureSession.stop();
+        const validation = await validateWavFile(savedPath, 0.1);
+        if (validation.valid) {
+          this.onEventCallback({
+            event: 'AUDIO_READY',
+            meeting_id: this.meetingId,
+            state: this.state,
+            timestamp: Date.now(),
+            message: `Audio recording saved and validated (${validation.durationSeconds.toFixed(1)}s, ${validation.fileSizeBytes} bytes)`,
+            details: {
+              audio_path: savedPath,
+              duration_seconds: validation.durationSeconds,
+              file_size_bytes: validation.fileSizeBytes,
+              sample_rate: validation.sampleRate,
+              channels: validation.channels,
+            },
+          });
+        } else {
+          this.onEventCallback({
+            event: 'LOG',
+            meeting_id: this.meetingId,
+            state: this.state,
+            timestamp: Date.now(),
+            message: `Audio file validation warning: ${validation.error}`,
+          });
+        }
+      } catch (err: unknown) {
+        console.error(`[GoogleMeetSession] Error stopping audio capture:`, err);
+      }
+      this.audioCaptureSession = null;
+    }
 
     try {
       if (this.context) {

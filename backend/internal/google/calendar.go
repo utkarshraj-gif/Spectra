@@ -4,12 +4,13 @@ Package google provides calendar event retrieval and bot deduplication logic.
 Purpose:
   - Fetches upcoming Google Calendar events using authenticated user tokens.
   - Extracts and normalizes Google Meet links using the meetings validator.
-  - Checks active and scheduled meetings to avoid duplicate bots for the same event.
+  - Correlates with active and scheduled meetings using meeting codes and event IDs to avoid duplicate bots.
 
 Key Types and Functions:
   - CalendarService (Struct)
   - NewCalendarService(oauthService, meetingRepo) *CalendarService
   - ListUpcomingEvents(ctx, userID, maxResults) ([]*CalendarEvent, error)
+  - GetEvent(ctx, userID, eventID) (*CalendarEvent, error)
   - ExtractMeetLink(event *googlecalendar.Event) (string, string)
 */
 package google
@@ -78,9 +79,15 @@ func (s *CalendarService) ListUpcomingEvents(ctx context.Context, userID string,
 	// Retrieve active and scheduled meetings for deduplication check
 	activeMeetings, _ := s.meetingRepo.List(ctx)
 	existingMeetCodes := make(map[string]bool)
+	existingEventIDs := make(map[string]bool)
 	for _, m := range activeMeetings {
-		if !m.Status.IsTerminal() && m.MeetingCode != "" {
-			existingMeetCodes[m.MeetingCode] = true
+		if !m.Status.IsTerminal() {
+			if m.MeetingCode != "" {
+				existingMeetCodes[m.MeetingCode] = true
+			}
+			if m.CalendarEventID != "" {
+				existingEventIDs[m.CalendarEventID] = true
+			}
 		}
 	}
 
@@ -101,7 +108,7 @@ func (s *CalendarService) ListUpcomingEvents(ctx context.Context, userID string,
 		}
 
 		hasBot := false
-		if meetCode != "" && existingMeetCodes[meetCode] {
+		if (meetCode != "" && existingMeetCodes[meetCode]) || (item.Id != "" && existingEventIDs[item.Id]) {
 			hasBot = true
 		}
 
@@ -119,6 +126,67 @@ func (s *CalendarService) ListUpcomingEvents(ctx context.Context, userID string,
 	}
 
 	return results, nil
+}
+
+// GetEvent retrieves a specific Google Calendar event by ID and evaluates Meet links & bot status.
+func (s *CalendarService) GetEvent(ctx context.Context, userID, eventID string) (*CalendarEvent, error) {
+	if !s.oauthService.IsConfigured() {
+		return nil, ErrOAuthNotConfigured
+	}
+
+	tok, err := s.oauthService.GetToken(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("user not authenticated with Google: %w", err)
+	}
+
+	tokenSource := s.oauthService.oauthConfig.TokenSource(ctx, tok.ToOAuth2Token())
+	srv, err := googlecalendar.NewService(ctx, option.WithTokenSource(tokenSource))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create calendar client: %w", err)
+	}
+
+	item, err := srv.Events.Get("primary", eventID).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch calendar event: %w", err)
+	}
+
+	meetURL, meetCode := ExtractMeetLink(item)
+
+	var startTime, endTime *time.Time
+	if item.Start != nil && item.Start.DateTime != "" {
+		if t, err := time.Parse(time.RFC3339, item.Start.DateTime); err == nil {
+			startTime = &t
+		}
+	}
+	if item.End != nil && item.End.DateTime != "" {
+		if t, err := time.Parse(time.RFC3339, item.End.DateTime); err == nil {
+			endTime = &t
+		}
+	}
+
+	// Retrieve active meetings for deduplication
+	activeMeetings, _ := s.meetingRepo.List(ctx)
+	hasBot := false
+	for _, m := range activeMeetings {
+		if !m.Status.IsTerminal() {
+			if (meetCode != "" && m.MeetingCode == meetCode) || (m.CalendarEventID != "" && m.CalendarEventID == item.Id) {
+				hasBot = true
+				break
+			}
+		}
+	}
+
+	return &CalendarEvent{
+		ID:          item.Id,
+		Summary:     item.Summary,
+		Description: item.Description,
+		StartTime:   startTime,
+		EndTime:     endTime,
+		MeetLink:    meetURL,
+		MeetCode:    meetCode,
+		HasBot:      hasBot,
+		Status:      item.Status,
+	}, nil
 }
 
 // ExtractMeetLink parses conference data or text description to extract a Google Meet link and code.

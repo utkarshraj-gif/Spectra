@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "login": "tsx src/login.ts",
     "dev": "tsx watch src/index.ts",
-    "test": "playwright test"
+    "test": "playwright test",
+    "test:audio": "tsx src/audio/verify-audio.ts"
   },
   "dependencies": {
     "playwright": "1.45.0",

@@ -11,6 +11,7 @@ FROM alpine:3.19 AS runner
 WORKDIR /app
 COPY --from=builder /app/api /app/api
 COPY --from=builder /app/migrations /app/migrations
+RUN mkdir -p /app/recordings
 
 EXPOSE 8080
 CMD ["/app/api"]

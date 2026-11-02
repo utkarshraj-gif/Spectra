@@ -4,6 +4,7 @@ and payload representations for meeting records and transcript segments.
 
 Purpose:
   - Defines the Meeting entity, MeetingStatus state machine states, and TranscriptSegment.
+  - Supports Google Calendar event correlation, audio paths, and failure messages.
   - Provides DTO requests and responses for API interactions.
 
 Key Types and Constants:
@@ -39,18 +40,21 @@ func (s MeetingStatus) IsTerminal() bool {
 
 // Meeting represents a persistent meeting session and bot dispatch record.
 type Meeting struct {
-	ID            string        `json:"id"`
-	Title         string        `json:"title"`
-	MeetingURL    string        `json:"meeting_url"`
-	MeetingCode   string        `json:"meeting_code"`
-	Status        MeetingStatus `json:"status"`
-	BotName       string        `json:"bot_name"`
-	ScheduledAt   *time.Time    `json:"scheduled_at,omitempty"`
-	StartedAt     *time.Time    `json:"started_at,omitempty"`
-	EndedAt       *time.Time    `json:"ended_at,omitempty"`
-	FailureReason string        `json:"failure_reason,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	ID              string        `json:"id"`
+	Title           string        `json:"title"`
+	MeetingURL      string        `json:"meeting_url"`
+	MeetingCode     string        `json:"meeting_code"`
+	Status          MeetingStatus `json:"status"`
+	BotName         string        `json:"bot_name"`
+	CalendarEventID string        `json:"calendar_event_id,omitempty"`
+	AudioPath       string        `json:"audio_path,omitempty"`
+	ErrorMessage    string        `json:"error_message,omitempty"`
+	ScheduledAt     *time.Time    `json:"scheduled_at,omitempty"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	EndedAt         *time.Time    `json:"ended_at,omitempty"`
+	FailureReason   string        `json:"failure_reason,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 // TranscriptSegment represents a single transcribed chunk with speaker attribution.
@@ -66,25 +70,30 @@ type TranscriptSegment struct {
 
 // CreateMeetingRequest represents the incoming JSON payload to create and start a meeting.
 type CreateMeetingRequest struct {
-	Title      string `json:"title" binding:"required"`
-	MeetingURL string `json:"meeting_url" binding:"required"`
-	BotName    string `json:"bot_name"`
+	Title           string     `json:"title" binding:"required"`
+	MeetingURL      string     `json:"meeting_url" binding:"required"`
+	BotName         string     `json:"bot_name"`
+	CalendarEventID string     `json:"calendar_event_id,omitempty"`
+	ScheduledAt     *time.Time `json:"scheduled_at,omitempty"`
 }
 
 // MeetingResponse represents the serialized meeting entity returned to clients.
 type MeetingResponse struct {
-	ID            string        `json:"id"`
-	Title         string        `json:"title"`
-	MeetingURL    string        `json:"meeting_url"`
-	MeetingCode   string        `json:"meeting_code"`
-	Status        MeetingStatus `json:"status"`
-	BotName       string        `json:"bot_name"`
-	ScheduledAt   *time.Time    `json:"scheduled_at,omitempty"`
-	StartedAt     *time.Time    `json:"started_at,omitempty"`
-	EndedAt       *time.Time    `json:"ended_at,omitempty"`
-	FailureReason string        `json:"failure_reason,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	ID              string        `json:"id"`
+	Title           string        `json:"title"`
+	MeetingURL      string        `json:"meeting_url"`
+	MeetingCode     string        `json:"meeting_code"`
+	Status          MeetingStatus `json:"status"`
+	BotName         string        `json:"bot_name"`
+	CalendarEventID string        `json:"calendar_event_id,omitempty"`
+	AudioPath       string        `json:"audio_path,omitempty"`
+	ErrorMessage    string        `json:"error_message,omitempty"`
+	ScheduledAt     *time.Time    `json:"scheduled_at,omitempty"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	EndedAt         *time.Time    `json:"ended_at,omitempty"`
+	FailureReason   string        `json:"failure_reason,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 // TranscriptResponse represents a list of transcript segments for a meeting.
@@ -97,17 +106,20 @@ type TranscriptResponse struct {
 // ToResponse converts a Meeting domain entity to its API response model.
 func (m *Meeting) ToResponse() *MeetingResponse {
 	return &MeetingResponse{
-		ID:            m.ID,
-		Title:         m.Title,
-		MeetingURL:    m.MeetingURL,
-		MeetingCode:   m.MeetingCode,
-		Status:        m.Status,
-		BotName:       m.BotName,
-		ScheduledAt:   m.ScheduledAt,
-		StartedAt:     m.StartedAt,
-		EndedAt:       m.EndedAt,
-		FailureReason: m.FailureReason,
-		CreatedAt:     m.CreatedAt,
-		UpdatedAt:     m.UpdatedAt,
+		ID:              m.ID,
+		Title:           m.Title,
+		MeetingURL:      m.MeetingURL,
+		MeetingCode:     m.MeetingCode,
+		Status:          m.Status,
+		BotName:         m.BotName,
+		CalendarEventID: m.CalendarEventID,
+		AudioPath:       m.AudioPath,
+		ErrorMessage:    m.ErrorMessage,
+		ScheduledAt:     m.ScheduledAt,
+		StartedAt:       m.StartedAt,
+		EndedAt:         m.EndedAt,
+		FailureReason:   m.FailureReason,
+		CreatedAt:       m.CreatedAt,
+		UpdatedAt:       m.UpdatedAt,
 	}
 }

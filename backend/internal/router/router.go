@@ -5,6 +5,7 @@ and attaches middleware for CORS, logging, and error recovery.
 Purpose:
   - Establishes the public-facing REST API contract using Gin.
   - Mounts health checks, meetings, calendar, google oauth, and graph endpoints.
+  - Supports dual prefixes (/api and /api/v1) for frontend and backend compatibility.
   - Supports dependency injection for hermetic unit and end-to-end testing.
 
 Key Types and Functions:
@@ -54,37 +55,35 @@ func New(deps RouterDeps) *gin.Engine {
 		})
 	})
 
-	// Register routes on both /api and /api/v1 for frontend compatibility.
-	apiGroups := []*gin.RouterGroup{
-		engine.Group("/api"),
-		engine.Group("/api/v1"),
-	}
+	// Mount routes on both /api and /api/v1 for complete frontend and backend compatibility
+	for _, prefix := range []string{"/api", "/api/v1"} {
+		rg := engine.Group(prefix)
+		{
+			// Meetings endpoints
+			if deps.MeetingService != nil {
+				meetingHandler := meetings.NewHandler(deps.MeetingService)
+				meetingHandler.RegisterRoutes(rg)
+			}
 
-	for _, apiGroup := range apiGroups {
-		// Meetings endpoints
-		if deps.MeetingService != nil {
-			meetingHandler := meetings.NewHandler(deps.MeetingService)
-			meetingHandler.RegisterRoutes(apiGroup)
-		}
+			// Calendar endpoints
+			calHandler := deps.CalendarHandler
+			if calHandler == nil {
+				calHandler = calendar.NewHandler(nil, deps.MeetingService)
+			}
+			calHandler.RegisterRoutes(rg)
 
-		// Calendar endpoints
-		calHandler := deps.CalendarHandler
-		if calHandler == nil {
-			calHandler = calendar.NewHandler(nil)
-		}
-		calHandler.RegisterRoutes(apiGroup)
+			// Google OAuth endpoints
+			if deps.GoogleHandler != nil {
+				deps.GoogleHandler.RegisterRoutes(rg)
+			}
 
-		// Google OAuth endpoints
-		if deps.GoogleHandler != nil {
-			deps.GoogleHandler.RegisterRoutes(apiGroup)
+			// Graph endpoints (initially returns "not configured")
+			grHandler := deps.GraphHandler
+			if grHandler == nil {
+				grHandler = graph.NewHandler()
+			}
+			grHandler.RegisterRoutes(rg)
 		}
-
-		// Graph endpoints
-		grHandler := deps.GraphHandler
-		if grHandler == nil {
-			grHandler = graph.NewHandler()
-		}
-		grHandler.RegisterRoutes(apiGroup)
 	}
 
 	return engine
