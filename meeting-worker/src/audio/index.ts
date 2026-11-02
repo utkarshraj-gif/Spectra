@@ -7,3 +7,4 @@ export * from './wav.js';
 export * from './capture-manager.js';
 export * from './validator.js';
 export * from './ffmpeg.js';
+export * from './streamer.js';
