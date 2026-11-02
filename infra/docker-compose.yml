@@ -20,7 +20,7 @@ services:
     environment:
       - PORT=8080
       - DATABASE_URL=postgres://postgres:postgres@db:5432/spectra?sslmode=disable
-      - WORKER_SERVICE_URL=http://meeting-worker:5001
+      - WORKER_SERVICE_URL=${WORKER_SERVICE_URL:-http://meeting-worker:5001}
       - AI_SERVICE_URL=http://ai-service:8000
       - RECORDINGS_PATH=/app/recordings
     volumes:
@@ -43,6 +43,7 @@ services:
       - RECORDINGS_PATH=/app/recordings
     volumes:
       - ../recordings:/app/recordings
+      - ../meeting-worker/bot-profile:/app/bot-profile
 
   # Python AI Service (Faster-Whisper STT - Phase 3)
   ai-service:

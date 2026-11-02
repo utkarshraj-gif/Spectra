@@ -48,3 +48,5 @@ docs/RESPONSIBILITIES.md
 # Bot persistent profiles
 bot-profile/
 .chrome-profile/
+meeting-worker/recordings/
+meeting-worker/bot-profile/

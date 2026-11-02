@@ -32,15 +32,24 @@ export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--window-size=1280,720',
 ];
 
-export async function createMeetingContext(meetingId: string): Promise<{ context: BrowserContext; profileDir: string }> {
+export interface CreateMeetingContextOptions {
+  headless?: boolean;
+}
+
+export async function createMeetingContext(
+  meetingId: string,
+  options?: CreateMeetingContextOptions
+): Promise<{ context: BrowserContext; profileDir: string }> {
   // Durable persistent profile directory for browser session state
   const profileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
   if (!fs.existsSync(profileDir)) {
     fs.mkdirSync(profileDir, { recursive: true });
   }
 
+  const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
+
   const baseOptions = {
-    headless: config.headless,
+    headless: isHeadless,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [...SPECTRA_JOIN_BROWSER_ARGS],
     permissions: ['microphone', 'camera'] as string[],
