@@ -15,6 +15,7 @@ Key Types and Functions:
   - GetMeeting(ctx, id) (*Meeting, error)
   - StopMeeting(ctx, id) (*Meeting, error)
   - GetTranscript(ctx, id) ([]*TranscriptSegment, error)
+  - ProcessMeetingAudio(ctx, meetingID, audioPath) (*Meeting, error)
 */
 package meetings
 
@@ -24,6 +25,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"spectrum-ai/backend/internal/transcription"
 
 	"github.com/google/uuid"
 )
@@ -37,6 +40,7 @@ var (
 type Service struct {
 	repo           Repository
 	worker         WorkerClient
+	transcriber    transcription.Client
 	defaultBotName string
 }
 
@@ -48,7 +52,15 @@ func NewService(repo Repository, worker WorkerClient, defaultBotName string) *Se
 	return &Service{
 		repo:           repo,
 		worker:         worker,
+		transcriber:    transcription.NewMockClient(),
 		defaultBotName: defaultBotName,
+	}
+}
+
+// SetTranscriber injects the transcription client.
+func (s *Service) SetTranscriber(t transcription.Client) {
+	if t != nil {
+		s.transcriber = t
 	}
 }
 
@@ -77,15 +89,17 @@ func (s *Service) CreateAndStartMeeting(ctx context.Context, req *CreateMeetingR
 
 	now := time.Now().UTC()
 	meeting := &Meeting{
-		ID:          uuid.New().String(),
-		Title:       title,
-		MeetingURL:  canonicalURL,
-		MeetingCode: code,
-		Status:      StatusWaitingForAdmission,
-		BotName:     botName,
-		StartedAt:   &now,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:              uuid.New().String(),
+		Title:           title,
+		MeetingURL:      canonicalURL,
+		MeetingCode:     code,
+		Status:          StatusWaitingForAdmission,
+		BotName:         botName,
+		CalendarEventID: strings.TrimSpace(req.CalendarEventID),
+		ScheduledAt:     req.ScheduledAt,
+		StartedAt:       &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	// 2. Persist record in repository
@@ -164,6 +178,66 @@ func (s *Service) StopMeeting(ctx context.Context, id string) (*Meeting, error) 
 
 	if err := s.repo.Update(ctx, meeting); err != nil {
 		return nil, fmt.Errorf("failed to update meeting: %w", err)
+	}
+
+	return meeting, nil
+}
+
+// ProcessMeetingAudio sends recorded meeting audio to the AI transcription service,
+// persists all returned transcript segments, and finalizes meeting status.
+func (s *Service) ProcessMeetingAudio(ctx context.Context, meetingID string, audioPath string) (*Meeting, error) {
+	id := strings.TrimSpace(meetingID)
+	if id == "" {
+		return nil, errors.New("meeting id is required")
+	}
+
+	meeting, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("meeting not found: %w", err)
+	}
+
+	// 1. Transition to processing
+	meeting.Status = StatusProcessing
+	meeting.AudioPath = audioPath
+	meeting.UpdatedAt = time.Now().UTC()
+	if err := s.repo.Update(ctx, meeting); err != nil {
+		return nil, fmt.Errorf("failed to update status to processing: %w", err)
+	}
+
+	// 2. Call AI transcription service
+	result, err := s.transcriber.TranscribeFile(ctx, id, audioPath)
+	if err != nil {
+		meeting.Status = StatusFailed
+		meeting.FailureReason = fmt.Sprintf("transcription error: %v", err)
+		meeting.ErrorMessage = meeting.FailureReason
+		meeting.UpdatedAt = time.Now().UTC()
+		_ = s.repo.Update(ctx, meeting)
+		return nil, fmt.Errorf("transcription processing failed: %w", err)
+	}
+
+	// 3. Persist segments in repository
+	for _, seg := range result.Segments {
+		segmentModel := &TranscriptSegment{
+			ID:          uuid.New().String(),
+			MeetingID:   id,
+			Speaker:     seg.Speaker,
+			Text:        seg.Text,
+			StartTimeMs: seg.StartTimeMs,
+			EndTimeMs:   seg.EndTimeMs,
+			CreatedAt:   time.Now().UTC(),
+		}
+		_ = s.repo.AddTranscriptSegment(ctx, segmentModel)
+	}
+
+	// 4. Mark completed
+	now := time.Now().UTC()
+	meeting.Status = StatusCompleted
+	if meeting.EndedAt == nil {
+		meeting.EndedAt = &now
+	}
+	meeting.UpdatedAt = now
+	if err := s.repo.Update(ctx, meeting); err != nil {
+		return nil, fmt.Errorf("failed to update meeting to completed: %w", err)
 	}
 
 	return meeting, nil

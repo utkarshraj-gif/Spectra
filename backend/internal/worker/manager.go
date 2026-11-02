@@ -11,12 +11,16 @@ import (
 // StateListener is a callback function invoked when a meeting state changes
 type StateListener func(meetingID string, state State, message string)
 
+// EventListener is a callback function invoked when any worker telemetry event occurs
+type EventListener func(event Event)
+
 // Manager orchestrates meeting worker lifecycles and maintains state machines
 type Manager struct {
-	client    *Client
-	mu        sync.RWMutex
-	instances map[string]*instance
-	listeners []StateListener
+	client         *Client
+	mu             sync.RWMutex
+	instances      map[string]*instance
+	listeners      []StateListener
+	eventListeners []EventListener
 }
 
 type instance struct {
@@ -34,8 +38,10 @@ var (
 func InitManager(workerBaseURL string) *Manager {
 	once.Do(func() {
 		defaultManager = &Manager{
-			client:    NewClient(workerBaseURL),
-			instances: make(map[string]*instance),
+			client:         NewClient(workerBaseURL),
+			instances:      make(map[string]*instance),
+			listeners:      make([]StateListener, 0),
+			eventListeners: make([]EventListener, 0),
 		}
 	})
 	return defaultManager
@@ -56,6 +62,13 @@ func (m *Manager) OnStateChange(listener StateListener) {
 	m.listeners = append(m.listeners, listener)
 }
 
+// OnEvent registers a callback to be called on any worker telemetry event
+func (m *Manager) OnEvent(listener EventListener) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.eventListeners = append(m.eventListeners, listener)
+}
+
 func (m *Manager) notifyListeners(meetingID string, state State, message string) {
 	m.mu.RLock()
 	listeners := make([]StateListener, len(m.listeners))
@@ -64,6 +77,17 @@ func (m *Manager) notifyListeners(meetingID string, state State, message string)
 
 	for _, l := range listeners {
 		go l(meetingID, state, message)
+	}
+}
+
+func (m *Manager) notifyEventListeners(event Event) {
+	m.mu.RLock()
+	listeners := make([]EventListener, len(m.eventListeners))
+	copy(listeners, m.eventListeners)
+	m.mu.RUnlock()
+
+	for _, l := range listeners {
+		go l(event)
 	}
 }
 
@@ -191,6 +215,7 @@ func (m *Manager) monitorEventStream(ctx context.Context, meetingID string) {
 		if event.State != "" {
 			m.updateState(meetingID, event.State, event.Message)
 		}
+		m.notifyEventListeners(event)
 	})
 
 	if err != nil && ctx.Err() == nil {
@@ -198,4 +223,3 @@ func (m *Manager) monitorEventStream(ctx context.Context, meetingID string) {
 		m.updateState(meetingID, StateFailed, fmt.Sprintf("Event stream disconnected: %v", err))
 	}
 }
-
