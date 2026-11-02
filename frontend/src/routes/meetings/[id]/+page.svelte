@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { getMeeting, getTranscript, stopMeeting } from '$lib/api/client';
+  import { getMeeting, getTranscript, stopMeeting, subscribeMeetingEvents, type LiveMeetingEvent } from '$lib/api/client';
   import type { Meeting, TranscriptSegment } from '$lib/types';
   import StatusBadge from '$lib/components/StatusBadge.svelte';
   import TranscriptViewer from '$lib/components/TranscriptViewer.svelte';
@@ -13,6 +13,7 @@
   let stopping = false;
 
   let pollInterval: ReturnType<typeof setInterval>;
+  let unsubscribeLive: (() => void) | null = null;
 
   // Guaranteed to be string inside this route
   $: meetingId = $page.params.id as string;
@@ -22,9 +23,12 @@
 
     try {
       meeting = await getMeeting(meetingId);
-      if (['completed', 'processing', 'recording'].includes(meeting.status)) {
+      if (['completed', 'processing', 'recording', 'joined'].includes(meeting.status)) {
         try {
-          segments = await getTranscript(meetingId);
+          const fresh = await getTranscript(meetingId);
+          if (fresh.length > 0) {
+            segments = fresh;
+          }
         } catch {
           // transcript may not be ready yet
         }
@@ -36,8 +40,22 @@
     }
   }
 
+  function handleLiveEvent(event: LiveMeetingEvent) {
+    if (event.type === 'TRANSCRIPT_SEGMENT' && event.payload) {
+      const seg: TranscriptSegment = event.payload;
+      if (!segments.some((s) => s.id === seg.id)) {
+        segments = [...segments, seg];
+      }
+    } else if (event.type === 'STATE_CHANGE' && event.payload) {
+      meeting = { ...meeting, ...event.payload };
+    }
+  }
+
   onMount(() => {
     load();
+    if (meetingId) {
+      unsubscribeLive = subscribeMeetingEvents(meetingId, handleLiveEvent);
+    }
     pollInterval = setInterval(async () => {
       if (!meeting) return;
       if (['completed', 'failed', 'cancelled'].includes(meeting.status)) {
@@ -50,6 +68,7 @@
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
+    if (unsubscribeLive) unsubscribeLive();
   });
 
   async function handleStop() {
@@ -95,13 +114,14 @@
 
     <div class="grid">
       <div class="main-panel">
-        <h2>Transcript</h2>
+        <h2>Live Transcript</h2>
         <TranscriptViewer {segments} />
       </div>
 
       <div class="side-panel">
         <h3>Details</h3>
         <ul>
+          <li><strong>Platform:</strong> {meeting.platform || 'Google Meet'}</li>
           <li><strong>Status:</strong> {meeting.status}</li>
           <li><strong>Created:</strong> {new Date(meeting.created_at).toLocaleString()}</li>
           {#if meeting.started_at}

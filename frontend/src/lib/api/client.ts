@@ -65,3 +65,34 @@ export async function stopMeeting(id: string) {
     method: 'POST'
   });
 }
+
+export interface LiveMeetingEvent {
+  type: 'TRANSCRIPT_SEGMENT' | 'STATE_CHANGE';
+  meeting_id: string;
+  payload: any;
+}
+
+export function subscribeMeetingEvents(
+  meetingId: string,
+  onEvent: (event: LiveMeetingEvent) => void
+): () => void {
+  if (typeof window === 'undefined') {
+    return () => {};
+  }
+
+  const url = `${API_BASE_URL}/api/v1/meetings/${meetingId}/live`;
+  const eventSource = new EventSource(url);
+
+  eventSource.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      onEvent(data);
+    } catch {
+      // ignore non-JSON messages
+    }
+  };
+
+  return () => {
+    eventSource.close();
+  };
+}
