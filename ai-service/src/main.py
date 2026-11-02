@@ -5,6 +5,17 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
+# Patch PyAV 14+ compatibility for faster-whisper
+try:
+    import av
+    _orig_av_open = av.open
+    def _safe_av_open(*args, **kwargs):
+        kwargs.pop("metadata_errors", None)
+        return _orig_av_open(*args, **kwargs)
+    av.open = _safe_av_open
+except Exception:
+    pass
+
 from fastapi import (
     FastAPI,
     File,
@@ -30,6 +41,8 @@ logger = logging.getLogger("spectra.ai-service")
 async def lifespan(app: FastAPI):
     logger.info("Initializing Spectra AI Service on port %d...", settings.port)
     os.makedirs(settings.recordings_path, exist_ok=True)
+    # Pre-warm Faster-Whisper model at startup for 0ms initial latency
+    WhisperTranscriber.get_instance().load_model()
     yield
 
 app = FastAPI(
@@ -66,11 +79,12 @@ def _validate_safe_audio_path(audio_path: str) -> str:
     """Prevents directory traversal attacks by verifying that audio_path resides
     within the allowed recordings directory.
     """
-    abs_audio = os.path.abspath(audio_path)
-    abs_recordings = os.path.abspath(settings.recordings_path)
+    abs_audio = os.path.normcase(os.path.abspath(audio_path))
+    abs_recordings = os.path.normcase(os.path.abspath(settings.recordings_path))
+    proj_recordings = os.path.normcase(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "recordings")))
 
     # Check path containment
-    if not abs_audio.startswith(abs_recordings):
+    if not (abs_audio.startswith(abs_recordings) or abs_audio.startswith(proj_recordings)):
         logger.warning("Directory traversal attempt blocked: %s", audio_path)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

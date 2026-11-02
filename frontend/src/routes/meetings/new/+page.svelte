@@ -1,11 +1,20 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
+  import { onMount } from 'svelte';
   import { createMeeting } from '$lib/api/client';
 
   let title = '';
   let meetingUrl = '';
   let loading = false;
   let error = '';
+
+  onMount(() => {
+    const urlParam = $page.url.searchParams.get('url');
+    if (urlParam) {
+      meetingUrl = urlParam;
+    }
+  });
 
   async function handleSubmit() {
     error = '';
@@ -26,7 +35,7 @@
 
 <div class="form-container">
   <h1>Join / Schedule Meeting</h1>
-  <p class="subtitle">Paste a Google Meet URL and deploy the Spectrum bot.</p>
+  <p class="subtitle">Paste a Google Meet, Zoom, or Teams URL and deploy the Spectrum bot.</p>
 
   {#if error}
     <div class="error">{error}</div>
@@ -41,7 +50,7 @@
       placeholder="e.g. Q4 Strategy Review"
     />
 
-    <label for="url">Google Meet URL *</label>
+    <label for="url">Meeting URL *</label>
     <input
       id="url"
       type="url"
