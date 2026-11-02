@@ -1,11 +1,12 @@
 /*
 Package meetings provides HTTP request handlers for meeting creation,
-listing, stopping, and transcript retrieval using the Gin web framework.
+listing, stopping, transcript retrieval, and real-time SSE streaming using Gin.
 
 Purpose:
   - Binds and validates HTTP request payloads for meeting operations.
   - Delegates execution to the meeting Service layer.
   - Translates domain errors into precise HTTP status codes (400, 404, 409, 502, 500).
+  - Streams real-time Server-Sent Events (SSE) to connected web browsers.
 
 Key Types and Functions:
   - Handler (Struct)
@@ -16,6 +17,8 @@ Key Types and Functions:
   - GetByID(c *gin.Context)
   - Stop(c *gin.Context)
   - GetTranscript(c *gin.Context)
+  - AddSegment(c *gin.Context)
+  - LiveStream(c *gin.Context)
 */
 package meetings
 
@@ -45,6 +48,8 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	rg.GET("/meetings/:id", h.GetByID)
 	rg.POST("/meetings/:id/stop", h.Stop)
 	rg.GET("/meetings/:id/transcript", h.GetTranscript)
+	rg.POST("/meetings/:id/segments", h.AddSegment)
+	rg.GET("/meetings/:id/live", h.LiveStream)
 }
 
 // Create handles POST /api/meetings: creates a meeting record and dispatches the bot.
@@ -148,4 +153,62 @@ func (h *Handler) GetTranscript(c *gin.Context) {
 	}
 
 	api.RespondJSON(c, http.StatusOK, resp)
+}
+
+// AddSegment handles POST /api/meetings/:id/segments: receives real-time transcript chunks from worker or AI service.
+func (h *Handler) AddSegment(c *gin.Context) {
+	id := c.Param("id")
+	var req CreateSegmentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "INVALID_REQUEST_BODY", "Invalid segment payload", err.Error())
+		return
+	}
+
+	segment, err := h.service.AddTranscriptSegment(c.Request.Context(), id, &req)
+	if err != nil {
+		if errors.Is(err, ErrMeetingNotFound) {
+			api.RespondError(c, http.StatusNotFound, "MEETING_NOT_FOUND", "Meeting not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to add transcript segment", err.Error())
+		return
+	}
+
+	api.RespondJSON(c, http.StatusCreated, segment)
+}
+
+// LiveStream handles GET /api/meetings/:id/live: streams real-time Server-Sent Events to browser clients.
+func (h *Handler) LiveStream(c *gin.Context) {
+	id := c.Param("id")
+	_, err := h.service.GetMeeting(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrMeetingNotFound) {
+			api.RespondError(c, http.StatusNotFound, "MEETING_NOT_FOUND", "Meeting not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to find meeting", err.Error())
+		return
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Flush()
+
+	ch := h.service.Subscribe(id)
+	defer h.service.Unsubscribe(id, ch)
+
+	notify := c.Request.Context().Done()
+	for {
+		select {
+		case <-notify:
+			return
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			c.SSEvent("message", event)
+			c.Writer.Flush()
+		}
+	}
 }

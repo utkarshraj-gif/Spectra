@@ -4,7 +4,7 @@ Package main is the entry point for the Spectra Backend REST API.
 Purpose:
   - Loads configuration from environment variables.
   - Initializes database placeholder, repositories, Google OAuth, meeting worker, and AI transcription clients.
-  - Orchestrates meeting lifecycle events and automated transcription.
+  - Orchestrates meeting lifecycle events, live streaming transcription, and audio processing.
   - Assembles the Gin HTTP router and starts the server.
 
 Key Functions:
@@ -75,7 +75,15 @@ func main() {
 	meetingService := meetings.NewService(meetingRepo, workerClient, cfg.DefaultBotName)
 	meetingService.SetTranscriber(transcriber)
 
-	// 7. Wire automated transcription on AUDIO_READY worker event
+	// Wire meeting supervisor monitoring
+	meetingService.OnMeetingStarted(func(m *meetings.Meeting) {
+		if cfg.WorkerServiceURL != "" {
+			log.Printf("[MeetingSupervisor] Subscribing to telemetry stream for meeting %s", m.ID)
+			workerMgr.MonitorMeeting(context.Background(), m.ID)
+		}
+	})
+
+	// 7. Wire automated transcription & live segments on worker telemetry events
 	workerMgr.OnEvent(func(event worker.Event) {
 		if event.Event == "AUDIO_READY" && event.MeetingID != "" {
 			if audioPath, ok := event.Details["audio_path"].(string); ok && audioPath != "" {
@@ -89,6 +97,22 @@ func main() {
 						log.Printf("[MeetingPipeline] SUCCESS: Meeting %s audio transcribed and segments saved.", mID)
 					}
 				}(event.MeetingID, audioPath)
+			}
+		} else if event.Event == "TRANSCRIPT_SEGMENT" && event.MeetingID != "" {
+			if len(event.Details) > 0 {
+				details := event.Details
+				text, _ := details["text"].(string)
+				speaker, _ := details["speaker"].(string)
+				startMs, _ := details["start_time_ms"].(float64)
+				endMs, _ := details["end_time_ms"].(float64)
+				if text != "" {
+					_, _ = meetingService.AddTranscriptSegment(context.Background(), event.MeetingID, &meetings.CreateSegmentRequest{
+						Speaker:     speaker,
+						Text:        text,
+						StartTimeMs: int64(startMs),
+						EndTimeMs:   int64(endMs),
+					})
+				}
 			}
 		}
 	})

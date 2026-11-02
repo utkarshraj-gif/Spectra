@@ -9,6 +9,7 @@ Purpose:
 Key Test Functions:
   - TestMeetingsAPI_FullLifecycle(t *testing.T)
   - TestMeetingsAPI_InvalidGoogleMeetURL(t *testing.T)
+  - TestMeetingsAPI_MultiPlatform_ZoomAndTeams(t *testing.T)
   - TestMeetingsAPI_WorkerFailure(t *testing.T)
   - TestMeetingsAPI_NotFound(t *testing.T)
   - TestMeetingsAPI_StopConflict(t *testing.T)
@@ -186,10 +187,10 @@ func TestMeetingsAPI_InvalidGoogleMeetURL(t *testing.T) {
 	engine, _, _ := setupTestRouter()
 
 	invalidPayloads := []map[string]string{
-		{"title": "Test Zoom", "meeting_url": "https://zoom.us/j/12345678"},
-		{"title": "Test Teams", "meeting_url": "https://teams.microsoft.com/meeting/123"},
-		{"title": "Test Malformed", "meeting_url": "https://meet.google.com/invalid-code"},
+		{"title": "Test Malformed Google Meet", "meeting_url": "https://meet.google.com/invalid-code"},
 		{"title": "Empty URL", "meeting_url": ""},
+		{"title": "Whitespace only", "meeting_url": "   "},
+		{"title": "Invalid Scheme", "meeting_url": "ftp://meet.google.com"},
 	}
 
 	for _, payload := range invalidPayloads {
@@ -202,6 +203,54 @@ func TestMeetingsAPI_InvalidGoogleMeetURL(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("expected 400 Bad Request for url %q, got %d", payload["meeting_url"], w.Code)
 		}
+	}
+}
+
+// TestMeetingsAPI_MultiPlatform_ZoomAndTeams verifies joining Zoom and Teams meetings.
+func TestMeetingsAPI_MultiPlatform_ZoomAndTeams(t *testing.T) {
+	engine, _, _ := setupTestRouter()
+
+	tests := []struct {
+		name             string
+		url              string
+		expectedPlatform meetings.MeetingPlatform
+	}{
+		{
+			name:             "Zoom meeting",
+			url:              "https://zoom.us/j/1234567890?pwd=abc",
+			expectedPlatform: meetings.PlatformZoom,
+		},
+		{
+			name:             "Teams meeting",
+			url:              "https://teams.microsoft.com/l/meetup-join/19:sample_thread",
+			expectedPlatform: meetings.PlatformTeams,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := map[string]string{
+				"title":       tt.name,
+				"meeting_url": tt.url,
+			}
+			bodyBytes, _ := json.Marshal(payload)
+			req, _ := http.NewRequest(http.MethodPost, "/api/meetings", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, req)
+
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201 Created for %s, got %d: %s", tt.url, w.Code, w.Body.String())
+			}
+
+			var resp meetings.MeetingResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if resp.Platform != tt.expectedPlatform {
+				t.Errorf("expected platform %s, got %s", tt.expectedPlatform, resp.Platform)
+			}
+		})
 	}
 }
 
