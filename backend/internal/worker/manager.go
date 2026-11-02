@@ -185,6 +185,31 @@ func (m *Manager) ListActiveMeetings() []*SessionInfo {
 	return list
 }
 
+// MonitorMeeting starts listening to worker SSE events for a meeting.
+func (m *Manager) MonitorMeeting(ctx context.Context, meetingID string) {
+	m.mu.Lock()
+	if _, exists := m.instances[meetingID]; exists {
+		m.mu.Unlock()
+		return
+	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	fsm := NewFSM(StateScheduled)
+	info := &SessionInfo{
+		MeetingID: meetingID,
+		State:     StateScheduled,
+		StartedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	m.instances[meetingID] = &instance{
+		fsm:        fsm,
+		info:       info,
+		cancelFunc: cancel,
+	}
+	m.mu.Unlock()
+
+	go m.monitorEventStream(sessionCtx, meetingID)
+}
+
 func (m *Manager) updateState(meetingID string, newState State, message string) {
 	m.mu.Lock()
 	inst, exists := m.instances[meetingID]

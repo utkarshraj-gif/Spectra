@@ -125,3 +125,48 @@ class WhisperTranscriber:
             segments=segments,
         )
 
+    def transcribe_pcm_stream(self, pcm_bytes: bytes, meeting_id: str, sample_rate: int = 16000) -> List[SegmentResponse]:
+        """Transcribes raw 16kHz mono Linear PCM bytes into timestamped segments in real-time."""
+        if not pcm_bytes or len(pcm_bytes) < 3200:
+            return []
+
+        model = self.load_model()
+        if model is None:
+            return [
+                SegmentResponse(
+                    id=0,
+                    start_time_ms=0,
+                    end_time_ms=int(len(pcm_bytes) / (sample_rate * 2) * 1000),
+                    speaker="Speaker 1",
+                    text="[Streaming transcription mock: audio chunk processed]",
+                )
+            ]
+
+        try:
+            import numpy as np
+            audio_data = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            segments_gen, _ = model.transcribe(
+                audio_data,
+                beam_size=3,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=300),
+                language="en",
+            )
+            segments: List[SegmentResponse] = []
+            for idx, s in enumerate(segments_gen):
+                text = s.text.strip()
+                if not text:
+                    continue
+                segments.append(
+                    SegmentResponse(
+                        id=idx,
+                        start_time_ms=int(s.start * 1000),
+                        end_time_ms=int(s.end * 1000),
+                        speaker="Speaker 1",
+                        text=text,
+                    )
+                )
+            return segments
+        except Exception as exc:
+            logger.error("Error transcribing PCM stream for %s: %s", meeting_id, exc)
+            return []

@@ -1,89 +1,16 @@
 import { BrowserContext, Page } from 'playwright';
 import { createMeetingContext, cleanupProfileDir } from './browser.js';
 import { config } from './config.js';
-import { MeetingState, SessionStatusEvent } from './types.js';
-import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile } from './audio/index.js';
+import { MeetingState, SessionStatusEvent, PlatformAdapter } from './types.js';
+import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile, LiveAudioStreamer } from './audio/index.js';
+import { getAdapterForUrl } from './platforms/index.js';
 
-// URL normalizer with pinned locale (?hl=en)
-function withPinnedMeetLocale(rawUrl: string): string {
-  let cleaned = rawUrl.trim();
-  if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
-    cleaned = 'https://' + cleaned;
-  }
-  try {
-    const parsed = new URL(cleaned);
-    const segments = parsed.pathname.split('/').filter(Boolean);
-    const code = segments[segments.length - 1] || '';
-    if (code) {
-      return `https://meet.google.com/${code}?hl=en`;
-    }
-  } catch {
-    // fallback
-  }
-  return cleaned.includes('?') ? `${cleaned}&hl=en` : `${cleaned}?hl=en`;
-}
-
-// Selectors for Google Meet pre-join and lobby elements
-const GOOGLE_NAME_INPUT_SELECTORS = [
-  'input[jsname][type="text"]',
-  'input[type="text"]:not([aria-hidden="true"])',
-  'div[jscontroller] input[type="text"]',
-  'input[type="text"][aria-label="Your name"]',
-  'input[placeholder*="name" i]',
-];
-
-const GOOGLE_JOIN_BUTTON_SELECTORS = [
-  '//button[.//span[text()="Ask to join"]]',
-  'button:has-text("Ask to join")',
-  'button:has-text("Join now")',
-  'button:has-text("Switch here")',
-  'button:has-text("Join")',
-  'button[jsname]:not([aria-label]):has(span)',
-];
-
-const GOOGLE_MIC_SELECTORS = [
-  '[aria-label*="Turn off microphone" i]',
-  'button[aria-label*="Turn off microphone" i]',
-  '[data-is-muted="false"]',
-];
-
-const GOOGLE_CAM_SELECTORS = [
-  '[aria-label*="Turn off camera" i]',
-  'button[aria-label*="Turn off camera" i]',
-  'button[aria-label*="Turn off video" i]',
-];
-
-const GOOGLE_ADMISSION_INDICATORS = [
-  'button[aria-label*="Leave call" i]',
-  'button[aria-label*="Leave meeting" i]',
-  '[data-participant-id]',
-  '[role="toolbar"]',
-];
-
-const GOOGLE_WAITING_INDICATORS = [
-  'text=Asking to be let in',
-  'text=Waiting for the host',
-  'text=Someone will let you in',
-  'text=You’ll join the call when someone lets you in',
-  '[aria-label*="waiting room" i]',
-  '[aria-label*="Asking to be let in" i]',
-];
-
-const GOOGLE_REJECTION_INDICATORS = [
-  'text=denied your request',
-  'text=denied your request to join',
-  'text=Your request to join was denied',
-  'text=You were denied',
-  'text=weren\'t allowed to join',
-  'text=Meeting has ended',
-  'text=Meeting not found',
-];
-
-export class GoogleMeetSession {
+export class MeetingSession {
   public readonly meetingId: string;
   public readonly meetingUrl: string;
   public readonly botName: string;
 
+  private adapter: PlatformAdapter;
   private context: BrowserContext | null = null;
   private profileDir: string | null = null;
   private page: Page | null = null;
@@ -91,6 +18,7 @@ export class GoogleMeetSession {
   private onEventCallback: (event: SessionStatusEvent) => void;
   private monitorInterval: NodeJS.Timeout | null = null;
   private audioCaptureSession: AudioCaptureSession | null = null;
+  private streamer: LiveAudioStreamer | null = null;
   private isDestroyed = false;
 
   constructor(
@@ -100,7 +28,8 @@ export class GoogleMeetSession {
     onEvent?: (event: SessionStatusEvent) => void
   ) {
     this.meetingId = meetingId;
-    this.meetingUrl = withPinnedMeetLocale(meetingUrl);
+    this.adapter = getAdapterForUrl(meetingUrl);
+    this.meetingUrl = this.adapter.normalizeUrl(meetingUrl);
     this.botName = botName || config.defaultBotName;
     this.onEventCallback = onEvent || (() => {});
   }
@@ -127,7 +56,7 @@ export class GoogleMeetSession {
 
   public async start(): Promise<void> {
     try {
-      this.transitionTo('INITIALIZING', 'Launching persistent browser context');
+      this.transitionTo('INITIALIZING', `Launching browser context for ${this.adapter.platform}`);
       const { context, profileDir } = await createMeetingContext(this.meetingId);
       this.context = context;
       this.profileDir = profileDir;
@@ -135,159 +64,38 @@ export class GoogleMeetSession {
       this.page = this.context.pages()[0] || (await this.context.newPage());
       this.page.setDefaultTimeout(config.navigationTimeoutMs);
 
-      // Navigate with pinned locale (?hl=en)
+      // Navigate
       this.transitionTo('NAVIGATING', `Navigating to ${this.meetingUrl}`);
       await this.page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' });
 
       // Pre-Join Setup
       this.transitionTo('PRE_JOIN', 'Configuring pre-join devices and identity');
-      await this.configurePreJoinRoom();
+      await this.adapter.configurePreJoin(this.page, this.botName);
 
       // Submit Join Request
-      await this.submitJoinRequest();
+      await this.adapter.submitJoinRequest(this.page);
 
       // Monitor Admission State
-      await this.waitForAdmissionOrEntry();
+      const admitted = await this.adapter.waitForAdmission(
+        this.page,
+        config.admissionTimeoutMs,
+        (st, msg) => this.transitionTo(st, msg)
+      );
+
+      if (admitted) {
+        this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
+        this.startInMeetingMonitor();
+        await this.startAudioCapture();
+        await this.setupSpeakerObserver();
+      } else {
+        if (this.state !== 'ADMISSION_DENIED') {
+          this.transitionTo('ADMISSION_DENIED', 'Admission timeout exceeded');
+        }
+        await this.cleanup();
+      }
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.transitionTo('FAILED', `Session execution error: ${errorMsg}`);
-      await this.cleanup();
-    }
-  }
-
-  private async configurePreJoinRoom(): Promise<void> {
-    if (!this.page) return;
-
-    // Wait for Google Meet pre-join SPA hydration
-    await this.page.waitForTimeout(3000);
-
-    // Dismiss any introductory dialogs
-    try {
-      const dismissButtons = this.page.locator('button:has-text("Dismiss"), button:has-text("Got it")');
-      if ((await dismissButtons.count()) > 0) {
-        await dismissButtons.first().click().catch(() => {});
-      }
-    } catch {
-      // Non-fatal
-    }
-
-    // 1. Turn OFF Microphone
-    try {
-      for (const sel of GOOGLE_MIC_SELECTORS) {
-        const mic = this.page.locator(sel).first();
-        if (await mic.isVisible()) {
-          await mic.click().catch(() => {});
-          break;
-        }
-      }
-    } catch {
-      await this.page.keyboard.press('Control+d');
-    }
-
-    // 2. Turn OFF Camera
-    try {
-      for (const sel of GOOGLE_CAM_SELECTORS) {
-        const cam = this.page.locator(sel).first();
-        if (await cam.isVisible()) {
-          await cam.click().catch(() => {});
-          break;
-        }
-      }
-    } catch {
-      await this.page.keyboard.press('Control+e');
-    }
-
-    // 3. Fill Bot Display Name if name field exists (Guest Join)
-    try {
-      for (const sel of GOOGLE_NAME_INPUT_SELECTORS) {
-        const nameInput = this.page.locator(sel).first();
-        if (await nameInput.isVisible()) {
-          await nameInput.fill(this.botName);
-          break;
-        }
-      }
-    } catch {
-      // Name input may not be present if signed in
-    }
-
-    await this.page.waitForTimeout(1000);
-  }
-
-  private async submitJoinRequest(): Promise<void> {
-    if (!this.page) return;
-
-    for (const sel of GOOGLE_JOIN_BUTTON_SELECTORS) {
-      const btn = this.page.locator(sel).first();
-      try {
-        if (await btn.isVisible()) {
-          await btn.click();
-          return;
-        }
-      } catch {
-        // try next selector
-      }
-    }
-
-    // If none was instantly visible, wait up to 10s for the primary CTA
-    const primaryCta = this.page.locator(GOOGLE_JOIN_BUTTON_SELECTORS.join(', ')).first();
-    await primaryCta.waitFor({ state: 'visible', timeout: 10000 });
-    await primaryCta.click();
-  }
-
-  private async waitForAdmissionOrEntry(): Promise<void> {
-    if (!this.page) return;
-
-    const startTime = Date.now();
-
-    while (!this.isDestroyed && Date.now() - startTime < config.admissionTimeoutMs) {
-      if (!this.page || this.page.isClosed()) {
-        this.transitionTo('CALL_ENDED', 'Browser page closed');
-        return;
-      }
-
-      // Check 1: In Meeting (Leave call button or in-meeting controls are visible)
-      for (const sel of GOOGLE_ADMISSION_INDICATORS) {
-        const el = this.page.locator(sel).first();
-        try {
-          if (await el.isVisible()) {
-            this.transitionTo('IN_MEETING', 'Bot successfully admitted to meeting room');
-            this.startInMeetingMonitor();
-            this.startAudioCapture();
-            return;
-          }
-        } catch {}
-      }
-
-      // Check 2: Waiting Room Indicators ("Asking to be let in")
-      for (const sel of GOOGLE_WAITING_INDICATORS) {
-        const el = this.page.locator(sel).first();
-        try {
-          if (await el.isVisible()) {
-            if (this.state !== 'WAITING_FOR_ADMISSION') {
-              this.transitionTo('WAITING_FOR_ADMISSION', 'Waiting for host to admit bot');
-            }
-            break;
-          }
-        } catch {}
-      }
-
-      // Check 3: Genuine Rejection (Host denied, NOT the "Return to home screen" button)
-      for (const sel of GOOGLE_REJECTION_INDICATORS) {
-        const el = this.page.locator(sel).first();
-        try {
-          if (await el.isVisible()) {
-            this.transitionTo('ADMISSION_DENIED', 'Host denied bot entry or call ended');
-            await this.cleanup();
-            return;
-          }
-        } catch {}
-      }
-
-      await this.page.waitForTimeout(2000);
-    }
-
-    if (this.state === 'WAITING_FOR_ADMISSION' || this.state === 'PRE_JOIN') {
-      this.transitionTo('ADMISSION_DENIED', 'Admission timeout exceeded');
       await this.cleanup();
     }
   }
@@ -302,7 +110,7 @@ export class GoogleMeetSession {
       }
 
       try {
-        const endedText = this.page.locator('text=/You left the meeting|The call has ended/i');
+        const endedText = this.page.locator('text=/You left the meeting|The call has ended|Meeting ended/i');
         if ((await endedText.count()) > 0 && (await endedText.first().isVisible())) {
           this.transitionTo('CALL_ENDED', 'Meeting has ended');
           await this.cleanup();
@@ -331,20 +139,91 @@ export class GoogleMeetSession {
   private async startAudioCapture(): Promise<void> {
     if (!this.page || this.audioCaptureSession) return;
     try {
+      const wsUrl = `${config.aiServiceWsUrl}/ws/transcribe/${this.meetingId}`;
+      this.streamer = new LiveAudioStreamer({
+        aiServiceWsUrl: wsUrl,
+        meetingId: this.meetingId,
+        onTranscriptSegment: (segment) => {
+          this.onEventCallback({
+            event: 'TRANSCRIPT_SEGMENT',
+            meeting_id: this.meetingId,
+            state: this.state,
+            timestamp: Date.now(),
+            message: segment.text,
+            details: {
+              speaker: segment.speaker,
+              text: segment.text,
+              start_time_ms: segment.start_time_ms,
+              end_time_ms: segment.end_time_ms,
+              is_final: segment.is_final,
+            },
+          });
+        },
+      });
+      this.streamer.connect();
+
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
         silenceThreshold: 0.003,
+        onPcmChunk: ({ pcmBuffer }) => {
+          if (this.streamer) {
+            this.streamer.sendPcmChunk(pcmBuffer);
+          }
+        },
       });
+
       this.onEventCallback({
         event: 'LOG',
         meeting_id: this.meetingId,
         state: this.state,
         timestamp: Date.now(),
-        message: 'AudioWorklet active: streaming 16kHz Linear PCM',
+        message: 'AudioWorklet active: streaming 16kHz Linear PCM to AI Service',
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[GoogleMeetSession] Failed to initialize audio capture: ${msg}`);
+      console.error(`[MeetingSession] Failed to initialize audio capture: ${msg}`);
+    }
+  }
+
+  private async setupSpeakerObserver(): Promise<void> {
+    if (!this.page) return;
+    try {
+      const bridgeFn = `__spectraSpeakerBridge_${this.meetingId.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      await this.page.exposeFunction(bridgeFn, (speakerName: string) => {
+        if (!speakerName) return;
+        if (this.streamer) {
+          this.streamer.notifyActiveSpeaker(speakerName);
+        }
+        this.onEventCallback({
+          event: 'SPEAKER_ACTIVE',
+          meeting_id: this.meetingId,
+          state: this.state,
+          timestamp: Date.now(),
+          details: { speaker: speakerName },
+        });
+      });
+
+      await this.page.evaluate((fnName) => {
+        const observer = new MutationObserver(() => {
+          const speakingEl = document.querySelector(
+            '[data-is-speaking="true"], [aria-label*="speaking" i], div[jscontroller][data-participant-id]:has([class*="speaking"])'
+          );
+          if (speakingEl) {
+            const nameEl = speakingEl.querySelector('[data-self-name], span[title], div[title]');
+            const name = nameEl?.textContent?.trim() || speakingEl.getAttribute('aria-label');
+            if (name && typeof (window as any)[fnName] === 'function') {
+              (window as any)[fnName](name);
+            }
+          }
+        });
+        observer.observe(document.body, {
+          attributes: true,
+          subtree: true,
+          attributeFilter: ['data-is-speaking', 'class', 'aria-label'],
+        });
+      }, bridgeFn);
+    } catch {
+      // non-critical
     }
   }
 
@@ -354,13 +233,8 @@ export class GoogleMeetSession {
 
     if (this.page && !this.page.isClosed()) {
       try {
-        const leaveButton = this.page.locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i]').first();
-        if (await leaveButton.isVisible()) {
-          await leaveButton.click({ timeout: 3000 }).catch(() => {});
-        }
-      } catch {
-        // Ignore
-      }
+        await this.adapter.leave(this.page);
+      } catch {}
     }
 
     this.transitionTo('CALL_ENDED', reason);
@@ -371,6 +245,11 @@ export class GoogleMeetSession {
     if (this.isDestroyed) return;
     this.isDestroyed = true;
     this.stopMonitoring();
+
+    if (this.streamer) {
+      this.streamer.close();
+      this.streamer = null;
+    }
 
     if (this.audioCaptureSession) {
       try {
@@ -391,17 +270,9 @@ export class GoogleMeetSession {
               channels: validation.channels,
             },
           });
-        } else {
-          this.onEventCallback({
-            event: 'LOG',
-            meeting_id: this.meetingId,
-            state: this.state,
-            timestamp: Date.now(),
-            message: `Audio file validation warning: ${validation.error}`,
-          });
         }
       } catch (err: unknown) {
-        console.error(`[GoogleMeetSession] Error stopping audio capture:`, err);
+        console.error(`[MeetingSession] Error stopping audio capture:`, err);
       }
       this.audioCaptureSession = null;
     }
@@ -420,3 +291,7 @@ export class GoogleMeetSession {
     }
   }
 }
+
+// Backward-compatible alias
+export type GoogleMeetSession = MeetingSession;
+export const GoogleMeetSession = MeetingSession;

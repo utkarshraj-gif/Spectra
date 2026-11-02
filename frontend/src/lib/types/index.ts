@@ -21,6 +21,7 @@ export type MeetingStatus =
 export interface Meeting {
   id: string;
   title: string;
+  platform?: string | null;
   meeting_url: string;
   status: MeetingStatus;
   calendar_event_id?: string | null;

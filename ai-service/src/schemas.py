@@ -12,7 +12,7 @@ class SegmentResponse(BaseModel):
     id: int
     start_time_ms: int
     end_time_ms: int
-    speaker: Optional[str] = "Speaker"
+    speaker: Optional[str] = "Speaker 1"
     text: str
 
 class TranscriptionRequest(BaseModel):
@@ -26,3 +26,11 @@ class TranscriptionResponse(BaseModel):
     total_segments: int
     segments: List[SegmentResponse]
 
+class StreamingSegmentEvent(BaseModel):
+    event: str = "TRANSCRIPT_SEGMENT"
+    meeting_id: str
+    speaker: str = "Speaker 1"
+    text: str
+    start_time_ms: int
+    end_time_ms: int
+    is_final: bool = True

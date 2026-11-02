@@ -9,14 +9,25 @@ Purpose:
 
 Key Types and Constants:
   - MeetingStatus (StatusScheduled, StatusWaitingForAdmission, StatusJoined, StatusRecording, StatusProcessing, StatusCompleted, StatusFailed, StatusCancelled)
+  - MeetingPlatform (PlatformGoogleMeet, PlatformZoom, PlatformTeams, PlatformGeneric)
   - Meeting
   - TranscriptSegment
-  - CreateMeetingRequest, MeetingResponse, TranscriptResponse
+  - CreateMeetingRequest, MeetingResponse, TranscriptResponse, CreateSegmentRequest
 */
 package meetings
 
 import (
 	"time"
+)
+
+// MeetingPlatform defines supported video call platforms.
+type MeetingPlatform string
+
+const (
+	PlatformGoogleMeet MeetingPlatform = "google_meet"
+	PlatformZoom       MeetingPlatform = "zoom"
+	PlatformTeams      MeetingPlatform = "teams"
+	PlatformGeneric    MeetingPlatform = "generic"
 )
 
 // MeetingStatus represents the lifecycle state of a meeting bot session.
@@ -40,21 +51,22 @@ func (s MeetingStatus) IsTerminal() bool {
 
 // Meeting represents a persistent meeting session and bot dispatch record.
 type Meeting struct {
-	ID              string        `json:"id"`
-	Title           string        `json:"title"`
-	MeetingURL      string        `json:"meeting_url"`
-	MeetingCode     string        `json:"meeting_code"`
-	Status          MeetingStatus `json:"status"`
-	BotName         string        `json:"bot_name"`
-	CalendarEventID string        `json:"calendar_event_id,omitempty"`
-	AudioPath       string        `json:"audio_path,omitempty"`
-	ErrorMessage    string        `json:"error_message,omitempty"`
-	ScheduledAt     *time.Time    `json:"scheduled_at,omitempty"`
-	StartedAt       *time.Time    `json:"started_at,omitempty"`
-	EndedAt         *time.Time    `json:"ended_at,omitempty"`
-	FailureReason   string        `json:"failure_reason,omitempty"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
+	ID              string          `json:"id"`
+	Title           string          `json:"title"`
+	Platform        MeetingPlatform `json:"platform"`
+	MeetingURL      string          `json:"meeting_url"`
+	MeetingCode     string          `json:"meeting_code"`
+	Status          MeetingStatus   `json:"status"`
+	BotName         string          `json:"bot_name"`
+	CalendarEventID string          `json:"calendar_event_id,omitempty"`
+	AudioPath       string          `json:"audio_path,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"`
+	ScheduledAt     *time.Time      `json:"scheduled_at,omitempty"`
+	StartedAt       *time.Time      `json:"started_at,omitempty"`
+	EndedAt         *time.Time      `json:"ended_at,omitempty"`
+	FailureReason   string          `json:"failure_reason,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 // TranscriptSegment represents a single transcribed chunk with speaker attribution.
@@ -70,30 +82,40 @@ type TranscriptSegment struct {
 
 // CreateMeetingRequest represents the incoming JSON payload to create and start a meeting.
 type CreateMeetingRequest struct {
-	Title           string     `json:"title" binding:"required"`
-	MeetingURL      string     `json:"meeting_url" binding:"required"`
-	BotName         string     `json:"bot_name"`
-	CalendarEventID string     `json:"calendar_event_id,omitempty"`
-	ScheduledAt     *time.Time `json:"scheduled_at,omitempty"`
+	Title           string          `json:"title" binding:"required"`
+	MeetingURL      string          `json:"meeting_url" binding:"required"`
+	Platform        MeetingPlatform `json:"platform,omitempty"`
+	BotName         string          `json:"bot_name"`
+	CalendarEventID string          `json:"calendar_event_id,omitempty"`
+	ScheduledAt     *time.Time      `json:"scheduled_at,omitempty"`
+}
+
+// CreateSegmentRequest represents incoming payload when worker or AI service pushes a live transcript chunk.
+type CreateSegmentRequest struct {
+	Speaker     string `json:"speaker"`
+	Text        string `json:"text" binding:"required"`
+	StartTimeMs int64  `json:"start_time_ms"`
+	EndTimeMs   int64  `json:"end_time_ms"`
 }
 
 // MeetingResponse represents the serialized meeting entity returned to clients.
 type MeetingResponse struct {
-	ID              string        `json:"id"`
-	Title           string        `json:"title"`
-	MeetingURL      string        `json:"meeting_url"`
-	MeetingCode     string        `json:"meeting_code"`
-	Status          MeetingStatus `json:"status"`
-	BotName         string        `json:"bot_name"`
-	CalendarEventID string        `json:"calendar_event_id,omitempty"`
-	AudioPath       string        `json:"audio_path,omitempty"`
-	ErrorMessage    string        `json:"error_message,omitempty"`
-	ScheduledAt     *time.Time    `json:"scheduled_at,omitempty"`
-	StartedAt       *time.Time    `json:"started_at,omitempty"`
-	EndedAt         *time.Time    `json:"ended_at,omitempty"`
-	FailureReason   string        `json:"failure_reason,omitempty"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
+	ID              string          `json:"id"`
+	Title           string          `json:"title"`
+	Platform        MeetingPlatform `json:"platform"`
+	MeetingURL      string          `json:"meeting_url"`
+	MeetingCode     string          `json:"meeting_code"`
+	Status          MeetingStatus   `json:"status"`
+	BotName         string          `json:"bot_name"`
+	CalendarEventID string          `json:"calendar_event_id,omitempty"`
+	AudioPath       string          `json:"audio_path,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"`
+	ScheduledAt     *time.Time      `json:"scheduled_at,omitempty"`
+	StartedAt       *time.Time      `json:"started_at,omitempty"`
+	EndedAt         *time.Time      `json:"ended_at,omitempty"`
+	FailureReason   string          `json:"failure_reason,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 // TranscriptResponse represents a list of transcript segments for a meeting.
@@ -105,9 +127,14 @@ type TranscriptResponse struct {
 
 // ToResponse converts a Meeting domain entity to its API response model.
 func (m *Meeting) ToResponse() *MeetingResponse {
+	platform := m.Platform
+	if platform == "" {
+		platform = PlatformGoogleMeet
+	}
 	return &MeetingResponse{
 		ID:              m.ID,
 		Title:           m.Title,
+		Platform:        platform,
 		MeetingURL:      m.MeetingURL,
 		MeetingCode:     m.MeetingCode,
 		Status:          m.Status,

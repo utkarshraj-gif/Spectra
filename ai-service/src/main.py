@@ -13,6 +13,8 @@ from fastapi import (
     HTTPException,
     status,
     Request,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -163,3 +165,81 @@ async def create_transcription(
         )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.websocket("/ws/transcribe/{meeting_id}")
+async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
+    """Real-time bi-directional streaming endpoint.
+    Accepts 16kHz 16-bit mono PCM binary frames from worker.
+    Accumulates audio into an utterance buffer, transcribes upon speech boundaries,
+    and returns timestamped segments in real-time.
+    """
+    await websocket.accept()
+    logger.info("WebSocket connected for real-time transcription of meeting %s", meeting_id)
+
+    buffer = bytearray()
+    chunk_sample_rate = 16000
+    bytes_per_sample = 2
+    # 2.5 second window for streaming transcription chunks
+    window_bytes = int(chunk_sample_rate * bytes_per_sample * 2.5)
+    last_emitted_ms = 0
+    active_speaker = "Speaker 1"
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"]:
+                chunk = message["bytes"]
+                buffer.extend(chunk)
+
+                if len(buffer) >= window_bytes:
+                    pcm_to_process = bytes(buffer)
+                    buffer.clear()
+
+                    segments = transcriber.transcribe_pcm_stream(pcm_to_process, meeting_id, chunk_sample_rate)
+                    for seg in segments:
+                        start_ms = last_emitted_ms + seg.start_time_ms
+                        end_ms = last_emitted_ms + seg.end_time_ms
+                        event = {
+                            "event": "TRANSCRIPT_SEGMENT",
+                            "meeting_id": meeting_id,
+                            "speaker": active_speaker,
+                            "text": seg.text,
+                            "start_time_ms": start_ms,
+                            "end_time_ms": end_ms,
+                            "is_final": True,
+                        }
+                        await websocket.send_json(event)
+                    last_emitted_ms += int(len(pcm_to_process) / (chunk_sample_rate * bytes_per_sample) * 1000)
+
+            elif "text" in message and message["text"]:
+                import json
+                try:
+                    payload = json.loads(message["text"])
+                    msg_type = payload.get("type")
+                    if msg_type == "SPEAKER_ACTIVE":
+                        active_speaker = payload.get("speaker") or active_speaker
+                    elif msg_type == "FLUSH" and len(buffer) > 3200:
+                        pcm_to_process = bytes(buffer)
+                        buffer.clear()
+                        segments = transcriber.transcribe_pcm_stream(pcm_to_process, meeting_id, chunk_sample_rate)
+                        for seg in segments:
+                            start_ms = last_emitted_ms + seg.start_time_ms
+                            end_ms = last_emitted_ms + seg.end_time_ms
+                            event = {
+                                "event": "TRANSCRIPT_SEGMENT",
+                                "meeting_id": meeting_id,
+                                "speaker": active_speaker,
+                                "text": seg.text,
+                                "start_time_ms": start_ms,
+                                "end_time_ms": end_ms,
+                                "is_final": True,
+                            }
+                            await websocket.send_json(event)
+                except Exception as e:
+                    logger.warning("Error parsing websocket JSON message: %s", e)
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected for meeting %s", meeting_id)
+    except Exception as exc:
+        logger.error("WebSocket error for meeting %s: %s", meeting_id, exc)
