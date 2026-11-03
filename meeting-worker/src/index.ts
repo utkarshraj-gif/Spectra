@@ -10,6 +10,9 @@ const eventListeners = new Map<string, Set<(event: SessionStatusEvent) => void>>
 
 function broadcastEvent(meetingId: string, event: SessionStatusEvent) {
   console.log(`[MeetingWorker][${event.state}] ${meetingId}: ${event.message || ''}`);
+  if (event.state === 'CALL_ENDED' || event.state === 'FAILED') {
+    sessions.delete(meetingId);
+  }
   const listeners = eventListeners.get(meetingId);
   if (listeners) {
     for (const listener of listeners) {

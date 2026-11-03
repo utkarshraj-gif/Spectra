@@ -126,6 +126,8 @@ export class MeetingSession {
   private startInMeetingMonitor(): void {
     if (this.monitorInterval) clearInterval(this.monitorInterval);
 
+    let soloCounter = 0;
+
     this.monitorInterval = setInterval(async () => {
       if (this.isDestroyed || !this.page || this.page.isClosed()) {
         this.stopMonitoring();
@@ -133,11 +135,82 @@ export class MeetingSession {
       }
 
       try {
-        const endedText = this.page.locator('text=/You left the meeting|The call has ended|Meeting ended/i');
-        if ((await endedText.count()) > 0 && (await endedText.first().isVisible())) {
-          this.transitionTo('CALL_ENDED', 'Meeting has ended');
+        // 1. Check for explicit meeting termination / ejection indicators
+        const ENDED_SELECTORS = [
+          'text=/You left the meeting/i',
+          'text=/The call has ended/i',
+          'text=/Meeting ended/i',
+          'text=/Your call was ended/i',
+          'text=/ended the meeting for everyone/i',
+          'text=/removed from the meeting/i',
+          'text=/Return to home screen/i',
+          'text=/You can\'t join this video call/i',
+          'text=/This meeting has already ended/i',
+          'text=/You\'re the only one here/i',
+          'button:has-text("Return to home screen")',
+        ];
+
+        let callEnded = false;
+        for (const sel of ENDED_SELECTORS) {
+          if (await this.page.locator(sel).first().isVisible().catch(() => false)) {
+            callEnded = true;
+            break;
+          }
+        }
+
+        // 2. Check if the in-call toolbar / leave button has disappeared
+        const inCallToolbar = this.page.locator(
+          'button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [role="toolbar"]'
+        ).first();
+        const hasToolbar = await inCallToolbar.isVisible().catch(() => false);
+
+        if (callEnded || (!hasToolbar && !this.isDestroyed)) {
+          this.transitionTo('CALL_ENDED', 'Meeting has ended or host ended call');
           await this.cleanup();
           return;
+        }
+
+        // 3. Check if all human participants have left (bot is alone in the room)
+        const participantCount = await this.page.evaluate((botName) => {
+          const botLower = (botName || '').trim().toLowerCase();
+
+          // Check People tab counter badge (e.g. "(1)" or "1" in People tab)
+          const counterEl = document.querySelector(
+            '[aria-label*="people" i], [aria-label*="everyone" i], [data-tab-id="1"]'
+          );
+          if (counterEl) {
+            const countMatch = (counterEl.textContent || counterEl.getAttribute('aria-label') || '').match(/\b([0-9]+)\b/);
+            if (countMatch) {
+              return parseInt(countMatch[1], 10);
+            }
+          }
+
+          // Check participant rows in People panel
+          const rows = document.querySelectorAll('[role="listitem"]');
+          if (rows.length > 0) {
+            let count = 0;
+            rows.forEach((r) => {
+              const txt = (r.textContent || '').toLowerCase();
+              if (txt && !txt.includes(botLower)) count++;
+            });
+            return count > 0 ? count + 1 : 1;
+          }
+
+          // Check video tiles
+          const tiles = document.querySelectorAll('div[data-participant-id], div[data-requested-participant-id]');
+          return tiles.length;
+        }, this.botName).catch(() => -1);
+
+        // If participant count is confirmed 1 (only the bot left in the call) for 2 checks (~3s)
+        if (participantCount === 1) {
+          soloCounter++;
+          if (soloCounter >= 2) {
+            console.log(`[MeetingSession] All participants left meeting ${this.meetingId}. Leaving call automatically.`);
+            await this.leave('All participants have left the meeting');
+            return;
+          }
+        } else if (participantCount > 1) {
+          soloCounter = 0;
         }
 
         this.onEventCallback({
@@ -149,7 +222,7 @@ export class MeetingSession {
       } catch {
         // Non-critical
       }
-    }, 5000);
+    }, 1500);
   }
 
   private stopMonitoring(): void {

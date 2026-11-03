@@ -114,6 +114,50 @@ func main() {
 					})
 				}
 			}
+		} else if (event.Event == "STATE_CHANGE" || event.State == "CALL_ENDED") && event.MeetingID != "" {
+			if event.State == "CALL_ENDED" {
+				go func(mID string) {
+					log.Printf("[MeetingSupervisor] Worker reported CALL_ENDED for %s. Marking meeting completed...", mID)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					m, err := meetingRepo.GetByID(ctx, mID)
+					if err == nil && !m.Status.IsTerminal() {
+						now := time.Now().UTC()
+						m.Status = meetings.StatusCompleted
+						m.EndedAt = &now
+						m.UpdatedAt = now
+						_ = meetingRepo.Update(ctx, m)
+						meetingService.Broadcast(m.ID, meetings.LiveEvent{
+							Type:      "STATE_CHANGE",
+							MeetingID: m.ID,
+							Payload:   m.ToResponse(),
+						})
+					}
+				}(event.MeetingID)
+			}
+		}
+	})
+
+	workerMgr.OnStateChange(func(meetingID string, state worker.State, message string) {
+		if state == worker.StateCallEnded && meetingID != "" {
+			go func(mID string) {
+				log.Printf("[MeetingSupervisor] StateListener CALL_ENDED for %s. Finalizing meeting to completed...", mID)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				m, err := meetingRepo.GetByID(ctx, mID)
+				if err == nil && !m.Status.IsTerminal() {
+					now := time.Now().UTC()
+					m.Status = meetings.StatusCompleted
+					m.EndedAt = &now
+					m.UpdatedAt = now
+					_ = meetingRepo.Update(ctx, m)
+					meetingService.Broadcast(m.ID, meetings.LiveEvent{
+						Type:      "STATE_CHANGE",
+						MeetingID: m.ID,
+						Payload:   m.ToResponse(),
+					})
+				}
+			}(meetingID)
 		}
 	})
 
