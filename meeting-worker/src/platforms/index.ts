@@ -123,42 +123,31 @@ export class GoogleMeetAdapter implements PlatformAdapter {
     timeoutMs: number,
     onStateChange: (state: MeetingState, message: string) => void
   ): Promise<boolean> {
-    const GOOGLE_ADMISSION_INDICATORS = [
+    const GOOGLE_IN_CALL_INDICATORS = [
       'button[aria-label*="Leave call" i]',
       'button[aria-label*="Leave meeting" i]',
-      '[data-participant-id]',
-      '[role="toolbar"]',
+      'button[aria-label*="Raise hand" i]',
+      'button[aria-label*="Turn on captions" i]',
     ];
     const GOOGLE_WAITING_INDICATORS = [
-      'text=Asking to be let in',
-      'text=Waiting for the host',
-      'text=Someone will let you in',
-      'text=You’ll join the call when someone lets you in',
+      'text=/Asking to be let in/i',
+      'text=/Waiting for the host/i',
+      'text=/Someone will let you in/i',
+      'text=/join the call when someone lets you in/i',
+      'text=/Asking to join/i',
     ];
     const GOOGLE_REJECTION_INDICATORS = [
-      'text=denied your request',
-      'text=Your request to join was denied',
-      'text=weren\'t allowed to join',
+      'text=/denied your request/i',
+      'text=/request to join was denied/i',
+      'text=/weren\'t allowed to join/i',
+      'text=/You can\'t join this call/i',
     ];
 
     const startTime = Date.now();
     while (Date.now() - startTime < timeoutMs) {
       if (page.isClosed()) return false;
 
-      for (const sel of GOOGLE_ADMISSION_INDICATORS) {
-        if (await page.locator(sel).first().isVisible().catch(() => false)) {
-          onStateChange('IN_MEETING', 'Admitted to Google Meet call');
-          return true;
-        }
-      }
-
-      for (const sel of GOOGLE_WAITING_INDICATORS) {
-        if (await page.locator(sel).first().isVisible().catch(() => false)) {
-          onStateChange('WAITING_FOR_ADMISSION', 'Waiting for host to admit bot');
-          break;
-        }
-      }
-
+      // 1. Explicit Rejection Check
       for (const sel of GOOGLE_REJECTION_INDICATORS) {
         if (await page.locator(sel).first().isVisible().catch(() => false)) {
           onStateChange('ADMISSION_DENIED', 'Host denied entry to Google Meet');
@@ -166,8 +155,31 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         }
       }
 
-      // Fast 250ms reactive tick for sub-second host admission detection
-      await page.waitForTimeout(250);
+      // 2. Waiting Lobby Check (Must take precedence over ambiguous UI elements)
+      let isWaiting = false;
+      for (const sel of GOOGLE_WAITING_INDICATORS) {
+        if (await page.locator(sel).first().isVisible().catch(() => false)) {
+          isWaiting = true;
+          onStateChange('WAITING_FOR_ADMISSION', 'Waiting for host to admit bot');
+          break;
+        }
+      }
+
+      if (isWaiting) {
+        await page.waitForTimeout(500);
+        continue;
+      }
+
+      // 3. In-Meeting Check (Only valid if NOT in waiting lobby)
+      for (const sel of GOOGLE_IN_CALL_INDICATORS) {
+        if (await page.locator(sel).first().isVisible().catch(() => false)) {
+          onStateChange('IN_MEETING', 'Admitted to Google Meet call');
+          return true;
+        }
+      }
+
+      // Fast reactive tick
+      await page.waitForTimeout(300);
     }
     return false;
   }

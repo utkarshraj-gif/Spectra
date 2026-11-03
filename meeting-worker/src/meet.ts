@@ -126,6 +126,8 @@ export class MeetingSession {
   private startInMeetingMonitor(): void {
     if (this.monitorInterval) clearInterval(this.monitorInterval);
 
+    const joinedAt = Date.now();
+    let hadHumanParticipants = false;
     let soloCounter = 0;
 
     this.monitorInterval = setInterval(async () => {
@@ -146,35 +148,22 @@ export class MeetingSession {
           'text=/Return to home screen/i',
           'text=/You can\'t join this video call/i',
           'text=/This meeting has already ended/i',
-          'text=/You\'re the only one here/i',
           'button:has-text("Return to home screen")',
         ];
 
-        let callEnded = false;
         for (const sel of ENDED_SELECTORS) {
           if (await this.page.locator(sel).first().isVisible().catch(() => false)) {
-            callEnded = true;
-            break;
+            this.transitionTo('CALL_ENDED', 'Meeting has ended or host ended call');
+            await this.cleanup();
+            return;
           }
         }
 
-        // 2. Check if the in-call toolbar / leave button has disappeared
-        const inCallToolbar = this.page.locator(
-          'button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [role="toolbar"]'
-        ).first();
-        const hasToolbar = await inCallToolbar.isVisible().catch(() => false);
-
-        if (callEnded || (!hasToolbar && !this.isDestroyed)) {
-          this.transitionTo('CALL_ENDED', 'Meeting has ended or host ended call');
-          await this.cleanup();
-          return;
-        }
-
-        // 3. Check if all human participants have left (bot is alone in the room)
+        // 2. Check participant count
         const participantCount = await this.page.evaluate((botName) => {
           const botLower = (botName || '').trim().toLowerCase();
 
-          // Check People tab counter badge (e.g. "(1)" or "1" in People tab)
+          // Check People tab counter badge
           const counterEl = document.querySelector(
             '[aria-label*="people" i], [aria-label*="everyone" i], [data-tab-id="1"]'
           );
@@ -201,16 +190,20 @@ export class MeetingSession {
           return tiles.length;
         }, this.botName).catch(() => -1);
 
-        // If participant count is confirmed 1 (only the bot left in the call) for 2 checks (~3s)
-        if (participantCount === 1) {
-          soloCounter++;
-          if (soloCounter >= 2) {
-            console.log(`[MeetingSession] All participants left meeting ${this.meetingId}. Leaving call automatically.`);
-            await this.leave('All participants have left the meeting');
-            return;
-          }
-        } else if (participantCount > 1) {
+        if (participantCount > 1) {
+          hadHumanParticipants = true;
           soloCounter = 0;
+        } else if (participantCount === 1) {
+          // If human participants were previously confirmed, and bot is now the sole participant left
+          // for at least 15 seconds (10 checks) after the initial 30s grace period
+          if (hadHumanParticipants && Date.now() - joinedAt > 30000) {
+            soloCounter++;
+            if (soloCounter >= 10) {
+              console.log(`[MeetingSession] All participants left meeting ${this.meetingId}. Leaving call automatically.`);
+              await this.leave('All participants have left the meeting');
+              return;
+            }
+          }
         }
 
         this.onEventCallback({
