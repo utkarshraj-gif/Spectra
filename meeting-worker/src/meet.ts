@@ -19,6 +19,7 @@ export class MeetingSession {
   private monitorInterval: NodeJS.Timeout | null = null;
   private audioCaptureSession: AudioCaptureSession | null = null;
   private streamer: LiveAudioStreamer | null = null;
+  private currentSpeaker = '';
   private isDestroyed = false;
 
   constructor(
@@ -61,12 +62,23 @@ export class MeetingSession {
       this.context = context;
       this.profileDir = profileDir;
 
-      this.page = this.context.pages()[0] || (await this.context.newPage());
-      this.page.setDefaultTimeout(config.navigationTimeoutMs);
+      const pages = this.context.pages();
+      if (pages.length > 0 && pages[0].url() === 'about:blank') {
+        this.page = pages[0];
+      } else {
+        this.page = await this.context.newPage();
+      }
+      const page = this.page;
+      if (!page) {
+        throw new Error('Failed to initialize page in context');
+      }
+      page.setDefaultTimeout(config.navigationTimeoutMs);
 
       // Navigate
       this.transitionTo('NAVIGATING', `Navigating to ${this.meetingUrl}`);
-      await this.page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' });
+      await page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' }).catch(async () => {
+        await page.goto(this.meetingUrl, { waitUntil: 'commit' });
+      });
 
       // Pre-Join Setup
       this.transitionTo('PRE_JOIN', 'Configuring pre-join devices and identity');
@@ -85,6 +97,22 @@ export class MeetingSession {
       if (admitted) {
         this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
         this.startInMeetingMonitor();
+
+        // Open People panel to ensure participant names and microphone states are directly visible in DOM
+        try {
+          const isPeoplePanelOpen = await this.page.evaluate(() => {
+            return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
+          });
+          if (!isPeoplePanelOpen) {
+            const peopleButton = this.page
+              .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
+              .first();
+            if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+              await peopleButton.click().catch(() => {});
+            }
+          }
+        } catch {}
+
         await this.startAudioCapture();
         await this.setupSpeakerObserver();
       } else {
@@ -103,6 +131,10 @@ export class MeetingSession {
   private startInMeetingMonitor(): void {
     if (this.monitorInterval) clearInterval(this.monitorInterval);
 
+    const joinedAt = Date.now();
+    let hadHumanParticipants = false;
+    let soloCounter = 0;
+
     this.monitorInterval = setInterval(async () => {
       if (this.isDestroyed || !this.page || this.page.isClosed()) {
         this.stopMonitoring();
@@ -110,11 +142,73 @@ export class MeetingSession {
       }
 
       try {
-        const endedText = this.page.locator('text=/You left the meeting|The call has ended|Meeting ended/i');
-        if ((await endedText.count()) > 0 && (await endedText.first().isVisible())) {
-          this.transitionTo('CALL_ENDED', 'Meeting has ended');
-          await this.cleanup();
-          return;
+        // 1. Check for explicit meeting termination / ejection indicators
+        const ENDED_SELECTORS = [
+          'text=/You left the meeting/i',
+          'text=/The call has ended/i',
+          'text=/Meeting ended/i',
+          'text=/Your call was ended/i',
+          'text=/ended the meeting for everyone/i',
+          'text=/removed from the meeting/i',
+          'text=/Return to home screen/i',
+          'text=/You can\'t join this video call/i',
+          'text=/This meeting has already ended/i',
+          'button:has-text("Return to home screen")',
+        ];
+
+        for (const sel of ENDED_SELECTORS) {
+          if (await this.page.locator(sel).first().isVisible().catch(() => false)) {
+            this.transitionTo('CALL_ENDED', 'Meeting has ended or host ended call');
+            await this.cleanup();
+            return;
+          }
+        }
+
+        // 2. Check participant count
+        const participantCount = await this.page.evaluate((botName) => {
+          const botLower = (botName || '').trim().toLowerCase();
+
+          // Check People tab counter badge
+          const counterEl = document.querySelector(
+            '[aria-label*="people" i], [aria-label*="everyone" i], [data-tab-id="1"]'
+          );
+          if (counterEl) {
+            const countMatch = (counterEl.textContent || counterEl.getAttribute('aria-label') || '').match(/\b([0-9]+)\b/);
+            if (countMatch) {
+              return parseInt(countMatch[1], 10);
+            }
+          }
+
+          // Check participant rows in People panel
+          const rows = document.querySelectorAll('[role="listitem"]');
+          if (rows.length > 0) {
+            let count = 0;
+            rows.forEach((r) => {
+              const txt = (r.textContent || '').toLowerCase();
+              if (txt && !txt.includes(botLower)) count++;
+            });
+            return count > 0 ? count + 1 : 1;
+          }
+
+          // Check video tiles
+          const tiles = document.querySelectorAll('div[data-participant-id], div[data-requested-participant-id]');
+          return tiles.length;
+        }, this.botName).catch(() => -1);
+
+        if (participantCount > 1) {
+          hadHumanParticipants = true;
+          soloCounter = 0;
+        } else if (participantCount === 1) {
+          // If human participants were previously confirmed, and bot is now the sole participant left
+          // for at least 15 seconds (10 checks) after the initial 30s grace period
+          if (hadHumanParticipants && Date.now() - joinedAt > 30000) {
+            soloCounter++;
+            if (soloCounter >= 10) {
+              console.log(`[MeetingSession] All participants left meeting ${this.meetingId}. Leaving call automatically.`);
+              await this.leave('All participants have left the meeting');
+              return;
+            }
+          }
         }
 
         this.onEventCallback({
@@ -126,7 +220,7 @@ export class MeetingSession {
       } catch {
         // Non-critical
       }
-    }, 5000);
+    }, 1500);
   }
 
   private stopMonitoring(): void {
@@ -144,6 +238,13 @@ export class MeetingSession {
         aiServiceWsUrl: wsUrl,
         meetingId: this.meetingId,
         onTranscriptSegment: (segment) => {
+          const effectiveSpeaker =
+            this.currentSpeaker && this.currentSpeaker !== 'Speaker 1'
+              ? this.currentSpeaker
+              : segment.speaker && segment.speaker !== 'Speaker 1'
+              ? segment.speaker
+              : this.currentSpeaker || 'Speaker';
+
           this.onEventCallback({
             event: 'TRANSCRIPT_SEGMENT',
             meeting_id: this.meetingId,
@@ -151,7 +252,7 @@ export class MeetingSession {
             timestamp: Date.now(),
             message: segment.text,
             details: {
-              speaker: segment.speaker,
+              speaker: effectiveSpeaker,
               text: segment.text,
               start_time_ms: segment.start_time_ms,
               end_time_ms: segment.end_time_ms,
@@ -164,7 +265,7 @@ export class MeetingSession {
 
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
-        silenceThreshold: 0.003,
+        silenceThreshold: 0.0008,
         onPcmChunk: ({ pcmBuffer }) => {
           if (this.streamer) {
             this.streamer.sendPcmChunk(pcmBuffer);
@@ -191,37 +292,197 @@ export class MeetingSession {
       const bridgeFn = `__spectraSpeakerBridge_${this.meetingId.replace(/[^a-zA-Z0-9]/g, '_')}`;
       await this.page.exposeFunction(bridgeFn, (speakerName: string) => {
         if (!speakerName) return;
+        const changed = speakerName !== this.currentSpeaker;
+        this.currentSpeaker = speakerName;
         if (this.streamer) {
           this.streamer.notifyActiveSpeaker(speakerName);
         }
-        this.onEventCallback({
-          event: 'SPEAKER_ACTIVE',
-          meeting_id: this.meetingId,
-          state: this.state,
-          timestamp: Date.now(),
-          details: { speaker: speakerName },
-        });
+        if (changed) {
+          this.onEventCallback({
+            event: 'SPEAKER_ACTIVE',
+            meeting_id: this.meetingId,
+            state: this.state,
+            timestamp: Date.now(),
+            details: { speaker: speakerName },
+          });
+        }
       });
 
-      await this.page.evaluate((fnName) => {
-        const observer = new MutationObserver(() => {
-          const speakingEl = document.querySelector(
-            '[data-is-speaking="true"], [aria-label*="speaking" i], div[jscontroller][data-participant-id]:has([class*="speaking"])'
-          );
-          if (speakingEl) {
-            const nameEl = speakingEl.querySelector('[data-self-name], span[title], div[title]');
-            const name = nameEl?.textContent?.trim() || speakingEl.getAttribute('aria-label');
-            if (name && typeof (window as any)[fnName] === 'function') {
-              (window as any)[fnName](name);
+      await this.page.evaluate(
+        ({ fnName, botName }) => {
+          const botLower = (botName || '').trim().toLowerCase();
+
+          function cleanCandidateName(raw: string): string {
+            let str = (raw || '').trim();
+            // 1. Strip Google Meet action phrases from pin/unpin or mic/camera controls
+            const unpinMatch = str.match(/(?:unpin|pin)\s+(.+?)\s+(?:from|to)\s+your\s+main\s+screen/i);
+            if (unpinMatch && unpinMatch[1]) {
+              str = unpinMatch[1];
+            }
+            const micMatch = str.match(/(?:mute|unmute)\s+(.+?)(?:'s|\s+microphone)/i);
+            if (micMatch && micMatch[1]) {
+              str = micMatch[1];
+            }
+
+            return str
+              .replace(/^(?:unpin|pin)\s+/i, '')
+              .replace(/\s+(?:from|to)\s+your\s+main\s+screen$/i, '')
+              .replace(/^(?:mute|unmute)\s+/i, '')
+              .replace(/\s+'s\s+microphone$/i, '')
+              .replace(/^(?:turn off|turn on)\s+/i, '')
+              .replace(/\s+'s\s+video$/i, '')
+              .replace(/\s*\(You\)/gi, '')
+              .replace(/\s*\(Host\)/gi, '')
+              .replace(/\s*\(Meeting host\)/gi, '')
+              .replace(/\s*Meeting host/gi, '')
+              .replace(/\s*\(Presentation\)/gi, '')
+              .replace(/('s video|'s screen|presentation|video feed)$/gi, '')
+              .replace(/[\n\r]+/g, ' ')
+              .trim();
+          }
+
+          function isValidPersonName(name: string): boolean {
+            if (!name || name.length < 2 || name.length > 40) return false;
+            const lower = name.toLowerCase();
+            if (lower.includes(botLower) || botLower.includes(lower)) return false;
+            if (
+              /^(you|people|chat|activities|details|meeting details|contributors|in the meeting|add people|search for people|pin|unpin|mute|unmute|turn on|turn off|more options|leave call|everyone|\d+|\d+:\d+)$/i.test(
+                name
+              )
+            ) {
+              return false;
+            }
+            // Block lingering action phrases
+            if (/^(?:unpin|pin|mute|unmute|turn)\b/i.test(name)) return false;
+            if (/\b(?:from your main screen|to your main screen)\b/i.test(name)) return false;
+            return true;
+          }
+
+          function scanAndReportSpeaker() {
+            const foundNames = new Set<string>();
+            let activeSpeaker: string | null = null;
+
+            // 1. Google Meet Video grid tiles & badges (Checked first for active speaking indicators)
+            const tileSelectors = [
+              'div[data-participant-id]',
+              'div[data-requested-participant-id]',
+              'div[data-tile-id]',
+              'div[data-allocation-index]',
+              'div[role="region"]',
+            ];
+
+            for (const sel of tileSelectors) {
+              document.querySelectorAll(sel).forEach((tile) => {
+                // Direct tile name element (bottom-left label badge in Google Meet)
+                const nameBadge = tile.querySelector('div[class*="name" i], span[class*="name" i], [data-self-name]');
+                if (nameBadge) {
+                  const cleaned = cleanCandidateName(nameBadge.getAttribute('data-self-name') || nameBadge.textContent || '');
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+
+                const selfName = tile.getAttribute('data-self-name');
+                if (selfName) {
+                  const cleaned = cleanCandidateName(selfName);
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+
+                // Check visible text badges inside tile
+                const badges = tile.querySelectorAll('span, div');
+                for (const badge of Array.from(badges)) {
+                  if (badge.children.length === 0) {
+                    const cleaned = cleanCandidateName(badge.textContent || '');
+                    if (isValidPersonName(cleaned)) {
+                      foundNames.add(cleaned);
+
+                      const isSpeaking = tile.querySelector(
+                        '[data-is-speaking="true"], [aria-label*="speaking" i], [jsname="B7I4Od"], [class*="speaking" i]'
+                      );
+                      if (isSpeaking) {
+                        activeSpeaker = cleaned;
+                      }
+                      break;
+                    }
+                  }
+                }
+
+                // Aria-label fallback only if direct text was not found
+                const aria = tile.getAttribute('aria-label');
+                if (aria) {
+                  const cleaned = cleanCandidateName(aria);
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+              });
+            }
+
+            // 2. Google Meet People Panel rows ([role="listitem"])
+            document.querySelectorAll('[role="listitem"]').forEach((row) => {
+              const rowText = row.textContent || '';
+              if (rowText.toLowerCase().includes(botLower)) return;
+
+              const spans = row.querySelectorAll('span, div');
+              for (const span of Array.from(spans)) {
+                if (span.children.length === 0) {
+                  const cleaned = cleanCandidateName(span.textContent || '');
+                  if (isValidPersonName(cleaned)) {
+                    foundNames.add(cleaned);
+
+                    // Check if unmuted or speaking in the row
+                    const isSpeaking = row.querySelector(
+                      '[data-is-speaking="true"], [aria-label*="speaking" i], [class*="speaking" i]'
+                    );
+                    const isUnmuted = row.querySelector(
+                      '[aria-label*="microphone" i]:not([aria-label*="off" i]):not([aria-label*="muted" i]), [data-is-muted="false"]'
+                    );
+                    if (isSpeaking || isUnmuted) {
+                      activeSpeaker = cleaned;
+                    }
+                    break;
+                  }
+                }
+              }
+            });
+
+            // 3. Search elements with (You) or (Host)
+            document.querySelectorAll('span, div').forEach((el) => {
+              if (el.children.length === 0) {
+                const txt = el.textContent || '';
+                if (txt.includes('(You)') || txt.includes('(Host)')) {
+                  const cleaned = cleanCandidateName(txt);
+                  if (isValidPersonName(cleaned)) {
+                    foundNames.add(cleaned);
+                  }
+                }
+              }
+            });
+
+            const namesList = Array.from(foundNames);
+
+            if (!activeSpeaker && namesList.length > 0) {
+              activeSpeaker = namesList[0];
+            }
+
+            if (activeSpeaker && typeof (window as any)[fnName] === 'function') {
+              (window as any)[fnName](activeSpeaker);
             }
           }
-        });
-        observer.observe(document.body, {
-          attributes: true,
-          subtree: true,
-          attributeFilter: ['data-is-speaking', 'class', 'aria-label'],
-        });
-      }, bridgeFn);
+
+          // Initial scan
+          scanAndReportSpeaker();
+
+          // Mutation observer
+          const observer = new MutationObserver(() => scanAndReportSpeaker());
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['data-is-speaking', 'aria-label', 'class', 'data-self-name'],
+          });
+
+          // Periodic scan every 1000ms
+          (window as any)[`__timer_${fnName}`] = setInterval(scanAndReportSpeaker, 1000);
+        },
+        { fnName: bridgeFn, botName: this.botName }
+      );
     } catch {
       // non-critical
     }
@@ -251,6 +512,16 @@ export class MeetingSession {
       this.streamer = null;
     }
 
+    if (this.page && !this.page.isClosed()) {
+      try {
+        const bridgeFn = `__spectraSpeakerBridge_${this.meetingId.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        await this.page.evaluate((fnName) => {
+          const tId = (window as any)[`__timer_${fnName}`];
+          if (tId) clearInterval(tId);
+        }, bridgeFn).catch(() => {});
+      } catch {}
+    }
+
     if (this.audioCaptureSession) {
       try {
         const savedPath = await this.audioCaptureSession.stop();
@@ -278,16 +549,13 @@ export class MeetingSession {
     }
 
     try {
-      if (this.context) {
-        await this.context.close().catch(() => {});
+      if (this.page && !this.page.isClosed()) {
+        await this.page.close().catch(() => {});
       }
     } finally {
       this.page = null;
       this.context = null;
-      if (this.profileDir) {
-        cleanupProfileDir(this.profileDir);
-        this.profileDir = null;
-      }
+      this.profileDir = null;
     }
   }
 }

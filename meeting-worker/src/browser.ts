@@ -23,7 +23,6 @@ export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--disable-infobars',
   '--disable-notifications',
   '--use-fake-ui-for-media-stream',
-  '--use-fake-device-for-media-stream',
   '--autoplay-policy=no-user-gesture-required',
   '--disable-blink-features=AutomationControlled',
   '--disable-dev-shm-usage',
@@ -36,10 +35,32 @@ export interface CreateMeetingContextOptions {
   headless?: boolean;
 }
 
+let sharedContext: BrowserContext | null = null;
+let sharedProfileDir: string | null = null;
+
+export async function prewarmBrowserContext(options?: CreateMeetingContextOptions): Promise<void> {
+  try {
+    await createMeetingContext('prewarm', options);
+    console.log('[Browser] Chrome context pre-warmed and ready for instant join');
+  } catch (err) {
+    console.warn('[Browser] Chrome pre-warming warning:', err);
+  }
+}
+
 export async function createMeetingContext(
   meetingId: string,
   options?: CreateMeetingContextOptions
 ): Promise<{ context: BrowserContext; profileDir: string }> {
+  // If warm persistent context is already active and healthy, reuse instantly (0ms launch delay)
+  if (sharedContext) {
+    try {
+      sharedContext.pages();
+      return { context: sharedContext, profileDir: sharedProfileDir! };
+    } catch {
+      sharedContext = null;
+    }
+  }
+
   // Durable persistent profile directory for browser session state
   const profileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
   if (!fs.existsSync(profileDir)) {
@@ -52,7 +73,7 @@ export async function createMeetingContext(
     headless: isHeadless,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [...SPECTRA_JOIN_BROWSER_ARGS],
-    permissions: ['microphone', 'camera'] as string[],
+    permissions: ['microphone'] as string[],
     viewport: { width: 1280, height: 720 },
     locale: 'en-US',
   };
@@ -69,6 +90,39 @@ export async function createMeetingContext(
     // Fallback to bundled Chromium (e.g. inside Docker container)
     context = await chromium.launchPersistentContext(profileDir, baseOptions);
   }
+
+  // Ensure bot never exposes synthetic green test video to Google Meet
+  await context.addInitScript(() => {
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        const origEnumerate = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+        navigator.mediaDevices.enumerateDevices = async () => {
+          const devices = await origEnumerate();
+          return devices.filter((d) => d.kind !== 'videoinput');
+        };
+      }
+
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async (constraints) => {
+          if (constraints && typeof constraints === 'object') {
+            if (constraints.video) {
+              constraints.video = false;
+            }
+          }
+          if (!constraints || (!constraints.audio && !constraints.video)) {
+            const err = new Error('Requested device not found');
+            err.name = 'NotFoundError';
+            throw err;
+          }
+          return origGUM(constraints);
+        };
+      }
+    } catch {}
+  });
+
+  sharedContext = context;
+  sharedProfileDir = profileDir;
 
   return { context, profileDir };
 }

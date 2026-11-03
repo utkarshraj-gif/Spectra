@@ -27,25 +27,29 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: #1e293b;
-    border: 1px solid #334155;
-    padding: 1.25rem;
-    border-radius: 8px;
+    background: var(--bg-elevated, #ffffff);
+    border: 1px solid var(--border, #e2e2e8);
+    box-shadow: var(--card-shadow, 0 4px 24px rgba(0, 0, 0, 0.06));
+    padding: 1.25rem 1.5rem;
+    border-radius: 12px;
     margin-bottom: 1rem;
     text-decoration: none;
-    color: inherit;
-    transition: border-color 0.15s;
+    color: var(--text, #131316);
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
   .meeting-card:hover {
-    border-color: #60a5fa;
+    border-color: #3b82f6;
+    box-shadow: 0 6px 20px rgba(59, 130, 246, 0.1);
   }
   h3 {
     margin: 0 0 0.25rem 0;
     font-size: 1.1rem;
+    color: var(--text, #131316);
+    font-weight: 600;
   }
   p {
     margin: 0;
-    color: #94a3b8;
+    color: var(--text-muted, #6b6b76);
     font-size: 0.875rem;
   }
 </style>

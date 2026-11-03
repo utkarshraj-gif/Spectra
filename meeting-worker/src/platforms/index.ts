@@ -27,77 +27,95 @@ export class GoogleMeetAdapter implements PlatformAdapter {
   }
 
   async configurePreJoin(page: Page, botName: string): Promise<void> {
-    const GOOGLE_MIC_SELECTORS = [
-      '[aria-label*="Turn off microphone" i]',
-      'button[aria-label*="Turn off microphone" i]',
-      '[data-is-muted="false"]',
-    ];
-    for (const sel of GOOGLE_MIC_SELECTORS) {
-      try {
-        const mic = page.locator(sel).first();
-        if (await mic.isVisible({ timeout: 1000 })) {
-          await mic.click();
-          break;
-        }
-      } catch {}
-    }
+    // 1. Fast check for "Rejoin" if meeting was previously joined with same URL
+    try {
+      const rejoinBtn = page.locator('button:has-text("Rejoin")').first();
+      if (await rejoinBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        await rejoinBtn.click({ timeout: 1000 }).catch(() => {});
+        await page.waitForTimeout(400);
+      }
+    } catch {}
 
-    const GOOGLE_CAM_SELECTORS = [
-      '[aria-label*="Turn off camera" i]',
-      'button[aria-label*="Turn off camera" i]',
-      'button[aria-label*="Turn off video" i]',
-    ];
-    for (const sel of GOOGLE_CAM_SELECTORS) {
-      try {
-        const cam = page.locator(sel).first();
-        if (await cam.isVisible({ timeout: 1000 })) {
-          await cam.click();
-          break;
-        }
-      } catch {}
-    }
-
-    const GOOGLE_NAME_INPUT_SELECTORS = [
-      'input[jsname][type="text"]',
-      'input[type="text"]:not([aria-hidden="true"])',
-      'div[jscontroller] input[type="text"]',
-      'input[type="text"][aria-label="Your name"]',
-      'input[placeholder*="name" i]',
-    ];
-    for (const sel of GOOGLE_NAME_INPUT_SELECTORS) {
-      try {
-        const nameInput = page.locator(sel).first();
-        if (await nameInput.isVisible({ timeout: 1000 })) {
+    // 2. Proactively fill bot identity into guest name input if present
+    try {
+      const nameInput = page
+        .locator('input[aria-label*="name" i], input[jsname][type="text"], input[type="text"]:not([aria-hidden="true"])')
+        .first();
+      if (await nameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const val = await nameInput.inputValue().catch(() => '');
+        if (!val || val.trim() !== botName) {
           await nameInput.fill(botName);
-          break;
+          await page.keyboard.press('Enter').catch(() => {});
         }
-      } catch {}
-    }
+      }
+    } catch {}
+
+    // 3. Ensure camera is muted without blindly toggling it on
+    try {
+      const camBtn = page.locator('button[aria-label*="camera" i]').first();
+      if (await camBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        const aria = (await camBtn.getAttribute('aria-label').catch(() => '')) || '';
+        if (/turn off/i.test(aria)) {
+          await camBtn.click().catch(() => {});
+        }
+      }
+    } catch {}
+
+    // 4. Ensure microphone is muted on join
+    try {
+      const micBtn = page.locator('button[aria-label*="microphone" i]').first();
+      if (await micBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        const aria = (await micBtn.getAttribute('aria-label').catch(() => '')) || '';
+        if (/turn off/i.test(aria)) {
+          await micBtn.click().catch(() => {});
+        }
+      }
+    } catch {}
   }
 
-  async submitJoinRequest(page: Page): Promise<void> {
-    const GOOGLE_JOIN_BUTTON_SELECTORS = [
-      '//button[.//span[text()="Ask to join"]]',
-      'button:has-text("Ask to join")',
-      'button:has-text("Join now")',
-      'button:has-text("Switch here")',
-      'button:has-text("Join")',
-      'button[jsname]:not([aria-label]):has(span)',
-    ];
+  async submitJoinRequest(page: Page, botName = 'Spectra'): Promise<void> {
+    // Fast check if already admitted
+    const inMeeting = await page
+      .locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [data-participant-id]')
+      .first()
+      .isVisible({ timeout: 100 })
+      .catch(() => false);
+    if (inMeeting) return;
 
-    for (const sel of GOOGLE_JOIN_BUTTON_SELECTORS) {
-      const btn = page.locator(sel).first();
-      try {
-        if (await btn.isVisible({ timeout: 1000 })) {
-          await btn.click();
-          return;
-        }
-      } catch {}
+    // Check if name input needs filling before clicking join CTA
+    const nameInput = page
+      .locator('input[aria-label*="name" i], input[type="text"]:not([aria-hidden="true"])')
+      .first();
+    if (await nameInput.isVisible({ timeout: 500 }).catch(() => false)) {
+      const val = await nameInput.inputValue().catch(() => '');
+      if (!val || val.trim().length === 0) {
+        await nameInput.fill(botName);
+        await page.keyboard.press('Enter').catch(() => {});
+      }
     }
 
-    const primaryCta = page.locator(GOOGLE_JOIN_BUTTON_SELECTORS.join(', ')).first();
-    await primaryCta.waitFor({ state: 'visible', timeout: 10000 });
-    await primaryCta.click();
+    // Unified reactive locator resolving immediately the moment ANY valid CTA appears
+    const primaryCta = page
+      .locator(
+        'button:has-text("Ask to join"), button:has-text("Join now"), button:has-text("Rejoin"), button:has-text("Switch here"), button:has-text("Join")'
+      )
+      .first();
+
+    await primaryCta.waitFor({ state: 'visible', timeout: 15000 });
+
+    const isDisabled = await primaryCta.evaluate((el: HTMLElement) => {
+      const btn = el as HTMLButtonElement;
+      return btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+    }).catch(() => false);
+
+    if (isDisabled) {
+      if (await nameInput.isVisible().catch(() => false)) {
+        await nameInput.fill(botName);
+        await page.waitForTimeout(200);
+      }
+    }
+
+    await primaryCta.click({ timeout: 2000 });
   }
 
   async waitForAdmission(
@@ -105,42 +123,31 @@ export class GoogleMeetAdapter implements PlatformAdapter {
     timeoutMs: number,
     onStateChange: (state: MeetingState, message: string) => void
   ): Promise<boolean> {
-    const GOOGLE_ADMISSION_INDICATORS = [
+    const GOOGLE_IN_CALL_INDICATORS = [
       'button[aria-label*="Leave call" i]',
       'button[aria-label*="Leave meeting" i]',
-      '[data-participant-id]',
-      '[role="toolbar"]',
+      'button[aria-label*="Raise hand" i]',
+      'button[aria-label*="Turn on captions" i]',
     ];
     const GOOGLE_WAITING_INDICATORS = [
-      'text=Asking to be let in',
-      'text=Waiting for the host',
-      'text=Someone will let you in',
-      'text=You’ll join the call when someone lets you in',
+      'text=/Asking to be let in/i',
+      'text=/Waiting for the host/i',
+      'text=/Someone will let you in/i',
+      'text=/join the call when someone lets you in/i',
+      'text=/Asking to join/i',
     ];
     const GOOGLE_REJECTION_INDICATORS = [
-      'text=denied your request',
-      'text=Your request to join was denied',
-      'text=weren\'t allowed to join',
+      'text=/denied your request/i',
+      'text=/request to join was denied/i',
+      'text=/weren\'t allowed to join/i',
+      'text=/You can\'t join this call/i',
     ];
 
     const startTime = Date.now();
     while (Date.now() - startTime < timeoutMs) {
       if (page.isClosed()) return false;
 
-      for (const sel of GOOGLE_ADMISSION_INDICATORS) {
-        if (await page.locator(sel).first().isVisible().catch(() => false)) {
-          onStateChange('IN_MEETING', 'Admitted to Google Meet call');
-          return true;
-        }
-      }
-
-      for (const sel of GOOGLE_WAITING_INDICATORS) {
-        if (await page.locator(sel).first().isVisible().catch(() => false)) {
-          onStateChange('WAITING_FOR_ADMISSION', 'Waiting for host to admit bot');
-          break;
-        }
-      }
-
+      // 1. Explicit Rejection Check
       for (const sel of GOOGLE_REJECTION_INDICATORS) {
         if (await page.locator(sel).first().isVisible().catch(() => false)) {
           onStateChange('ADMISSION_DENIED', 'Host denied entry to Google Meet');
@@ -148,7 +155,31 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         }
       }
 
-      await page.waitForTimeout(2000);
+      // 2. Waiting Lobby Check (Must take precedence over ambiguous UI elements)
+      let isWaiting = false;
+      for (const sel of GOOGLE_WAITING_INDICATORS) {
+        if (await page.locator(sel).first().isVisible().catch(() => false)) {
+          isWaiting = true;
+          onStateChange('WAITING_FOR_ADMISSION', 'Waiting for host to admit bot');
+          break;
+        }
+      }
+
+      if (isWaiting) {
+        await page.waitForTimeout(500);
+        continue;
+      }
+
+      // 3. In-Meeting Check (Only valid if NOT in waiting lobby)
+      for (const sel of GOOGLE_IN_CALL_INDICATORS) {
+        if (await page.locator(sel).first().isVisible().catch(() => false)) {
+          onStateChange('IN_MEETING', 'Admitted to Google Meet call');
+          return true;
+        }
+      }
+
+      // Fast reactive tick
+      await page.waitForTimeout(300);
     }
     return false;
   }

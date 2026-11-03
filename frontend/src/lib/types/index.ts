@@ -43,9 +43,12 @@ export interface Participant {
 export interface TranscriptSegment {
   id: string;
   meeting_id?: string;
-  start_seconds: number;
-  end_seconds: number;
+  start_seconds?: number;
+  end_seconds?: number;
+  start_time_ms?: number;
+  end_time_ms?: number;
   text: string;
+  speaker?: string | null;
   speaker_id?: string | null;
   language?: string | null;
   model_name?: string | null;

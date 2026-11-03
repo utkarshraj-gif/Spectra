@@ -12,9 +12,11 @@ class Settings(BaseSettings):
 
     service_name: str = "spectra-ai-service"
     port: int = 8000
-    whisper_model: str = os.getenv("WHISPER_MODEL", "base")
+    whisper_model: str = os.getenv("WHISPER_MODEL", "small.en")
     whisper_device: str = os.getenv("WHISPER_DEVICE", "cpu")
     whisper_compute_type: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    groq_model: str = os.getenv("GROQ_MODEL", "whisper-large-v3-turbo")
     recordings_path: str = default_recordings
     max_upload_size_mb: int = 500
 

@@ -2,6 +2,7 @@ import http from 'http';
 import { URL } from 'url';
 import { config } from './config.js';
 import { GoogleMeetSession } from './meet.js';
+import { prewarmBrowserContext } from './browser.js';
 import { SessionStatusEvent, StartSessionPayload, StopSessionPayload } from './types.js';
 
 const sessions = new Map<string, GoogleMeetSession>();
@@ -9,6 +10,9 @@ const eventListeners = new Map<string, Set<(event: SessionStatusEvent) => void>>
 
 function broadcastEvent(meetingId: string, event: SessionStatusEvent) {
   console.log(`[MeetingWorker][${event.state}] ${meetingId}: ${event.message || ''}`);
+  if (event.state === 'CALL_ENDED' || event.state === 'FAILED') {
+    sessions.delete(meetingId);
+  }
   const listeners = eventListeners.get(meetingId);
   if (listeners) {
     for (const listener of listeners) {
@@ -204,6 +208,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(config.port, () => {
   console.log(`[MeetingWorker] Service listening on port ${config.port}`);
+  prewarmBrowserContext().catch((err) => {
+    console.warn('[MeetingWorker] Browser pre-warm warning:', err);
+  });
 });
 
 // Graceful process shutdown
