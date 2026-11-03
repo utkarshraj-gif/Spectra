@@ -193,7 +193,16 @@ export async function startMeetingAudioCapture(
       }
 
       await scanAndConnect();
-      g.__spectraScanInterval = setInterval(scanAndConnect, 3000);
+      // Fast polling (250ms) during initial meeting startup to latch onto audio streams immediately
+      let initialScans = 0;
+      const fastScanTimer = setInterval(async function() {
+        initialScans++;
+        await scanAndConnect();
+        if (initialScans >= 16 || g.__spectraConnectedStreams.size > 0) {
+          clearInterval(fastScanTimer);
+        }
+      }, 250);
+      g.__spectraScanInterval = setInterval(scanAndConnect, 2000);
     })(${JSON.stringify({
       workletCode: WORKLET_SOURCE_CODE,
       workletName: PCM_WORKLET_NAME,

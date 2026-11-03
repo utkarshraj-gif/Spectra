@@ -97,28 +97,18 @@ export class MeetingSession {
       if (admitted) {
         this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
 
-        // Enforce muted microphone immediately upon entering meeting room
+        // 1. Immediately start audio capture for 0ms initial recording latency
+        await this.startAudioCapture();
+
+        // 2. Enforce muted microphone immediately upon entering meeting room
         await ensureMicrophoneMuted(this.page).catch(() => {});
 
+        // 3. Start in-meeting monitor and speaker observer
         this.startInMeetingMonitor();
-
-        // Open People panel to ensure participant names and microphone states are directly visible in DOM
-        try {
-          const isPeoplePanelOpen = await this.page.evaluate(() => {
-            return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
-          });
-          if (!isPeoplePanelOpen) {
-            const peopleButton = this.page
-              .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
-              .first();
-            if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
-              await peopleButton.click().catch(() => {});
-            }
-          }
-        } catch {}
-
-        await this.startAudioCapture();
         await this.setupSpeakerObserver();
+
+        // 4. Open People panel in background (non-blocking)
+        this.openPeoplePanel().catch(() => {});
       } else {
         if (this.state !== 'ADMISSION_DENIED') {
           this.transitionTo('ADMISSION_DENIED', 'Admission timeout exceeded');
@@ -263,6 +253,23 @@ export class MeetingSession {
     }
   }
 
+  private async openPeoplePanel(): Promise<void> {
+    if (!this.page) return;
+    try {
+      const isPeoplePanelOpen = await this.page.evaluate(() => {
+        return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
+      });
+      if (!isPeoplePanelOpen) {
+        const peopleButton = this.page
+          .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
+          .first();
+        if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await peopleButton.click().catch(() => {});
+        }
+      }
+    } catch {}
+  }
+
   private async startAudioCapture(): Promise<void> {
     if (!this.page || this.audioCaptureSession) return;
     try {
@@ -298,7 +305,7 @@ export class MeetingSession {
 
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
-        silenceThreshold: 0.0008,
+        silenceThreshold: 0.0004,
         onPcmChunk: ({ pcmBuffer }) => {
           if (this.streamer) {
             this.streamer.sendPcmChunk(pcmBuffer);

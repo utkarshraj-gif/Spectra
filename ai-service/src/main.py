@@ -208,7 +208,7 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     bytes_per_ms = 32  # 16000 * 2 / 1000 = 32 bytes per millisecond
     FRAME_BYTES = 3200  # 100ms per audio evaluation frame
     SILENCE_RMS_THRESHOLD = 0.0018  # speech vs background noise energy threshold
-    PAUSE_FRAMES_ENDPOINT = 12  # 1.2s silence pause endpoints a natural speech utterance
+    PAUSE_FRAMES_ENDPOINT = 7  # 700ms silence pause endpoints natural speech for real-time responsiveness
     MIN_SPEECH_FRAMES = 4  # 400ms min active speech to eliminate clicks and taps
     MAX_UTTERANCE_BYTES = chunk_sample_rate * bytes_per_sample * 15  # 15s max utterance chunk
 
@@ -279,12 +279,14 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     try:
         while True:
             try:
-                # Wait for next websocket message (max 0.2s so natural silence pause can trigger)
+                # Wait for next websocket message (max 0.2s so natural silence pause triggers promptly)
                 message = await asyncio.wait_for(websocket.receive(), timeout=0.2)
             except asyncio.TimeoutError:
-                # If currently in speech and silence frames have reached the pause endpoint threshold:
-                if speech_started and consecutive_silence_frames >= PAUSE_FRAMES_ENDPOINT:
-                    await flush_active_utterance()
+                # If currently in speech, advance silence frame count (0.2s timeout = two 100ms silence frames)
+                if speech_started:
+                    consecutive_silence_frames += 2
+                    if consecutive_silence_frames >= PAUSE_FRAMES_ENDPOINT:
+                        await flush_active_utterance()
                 continue
 
             if "bytes" in message and message["bytes"]:
