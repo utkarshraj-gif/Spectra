@@ -27,32 +27,53 @@ export class GoogleMeetAdapter implements PlatformAdapter {
   }
 
   async configurePreJoin(page: Page, botName: string): Promise<void> {
-    // 1. Fast non-blocking check for "Rejoin" if reused URL
+    // 1. Fast check for "Rejoin" if meeting was previously joined with same URL
     try {
       const rejoinBtn = page.locator('button:has-text("Rejoin")').first();
-      if (await rejoinBtn.isVisible({ timeout: 200 }).catch(() => false)) {
+      if (await rejoinBtn.isVisible({ timeout: 500 }).catch(() => false)) {
         await rejoinBtn.click({ timeout: 1000 }).catch(() => {});
+        await page.waitForTimeout(400);
       }
     } catch {}
 
-    // 2. Instant hardware mute shortcuts for Google Meet
-    try {
-      await page.keyboard.press('Control+e');
-      await page.keyboard.press('Control+d');
-    } catch {}
-
-    // 3. Fast non-blocking check for guest identity input
+    // 2. Proactively fill bot identity into guest name input if present
     try {
       const nameInput = page
-        .locator('input[aria-label="Your name"], input[jsname][type="text"], input[type="text"]:not([aria-hidden="true"])')
+        .locator('input[aria-label*="name" i], input[jsname][type="text"], input[type="text"]:not([aria-hidden="true"])')
         .first();
-      if (await nameInput.isVisible({ timeout: 300 }).catch(() => false)) {
-        await nameInput.fill(botName);
+      if (await nameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const val = await nameInput.inputValue().catch(() => '');
+        if (!val || val.trim() !== botName) {
+          await nameInput.fill(botName);
+          await page.keyboard.press('Enter').catch(() => {});
+        }
+      }
+    } catch {}
+
+    // 3. Ensure camera is muted without blindly toggling it on
+    try {
+      const camBtn = page.locator('button[aria-label*="camera" i]').first();
+      if (await camBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        const aria = (await camBtn.getAttribute('aria-label').catch(() => '')) || '';
+        if (/turn off/i.test(aria)) {
+          await camBtn.click().catch(() => {});
+        }
+      }
+    } catch {}
+
+    // 4. Ensure microphone is muted on join
+    try {
+      const micBtn = page.locator('button[aria-label*="microphone" i]').first();
+      if (await micBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        const aria = (await micBtn.getAttribute('aria-label').catch(() => '')) || '';
+        if (/turn off/i.test(aria)) {
+          await micBtn.click().catch(() => {});
+        }
       }
     } catch {}
   }
 
-  async submitJoinRequest(page: Page): Promise<void> {
+  async submitJoinRequest(page: Page, botName = 'Spectra'): Promise<void> {
     // Fast check if already admitted
     const inMeeting = await page
       .locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [data-participant-id]')
@@ -60,6 +81,18 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       .isVisible({ timeout: 100 })
       .catch(() => false);
     if (inMeeting) return;
+
+    // Check if name input needs filling before clicking join CTA
+    const nameInput = page
+      .locator('input[aria-label*="name" i], input[type="text"]:not([aria-hidden="true"])')
+      .first();
+    if (await nameInput.isVisible({ timeout: 500 }).catch(() => false)) {
+      const val = await nameInput.inputValue().catch(() => '');
+      if (!val || val.trim().length === 0) {
+        await nameInput.fill(botName);
+        await page.keyboard.press('Enter').catch(() => {});
+      }
+    }
 
     // Unified reactive locator resolving immediately the moment ANY valid CTA appears
     const primaryCta = page
@@ -69,6 +102,19 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       .first();
 
     await primaryCta.waitFor({ state: 'visible', timeout: 15000 });
+
+    const isDisabled = await primaryCta.evaluate((el: HTMLElement) => {
+      const btn = el as HTMLButtonElement;
+      return btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+    }).catch(() => false);
+
+    if (isDisabled) {
+      if (await nameInput.isVisible().catch(() => false)) {
+        await nameInput.fill(botName);
+        await page.waitForTimeout(200);
+      }
+    }
+
     await primaryCta.click({ timeout: 2000 });
   }
 
@@ -120,7 +166,8 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         }
       }
 
-      await page.waitForTimeout(2000);
+      // Fast 250ms reactive tick for sub-second host admission detection
+      await page.waitForTimeout(250);
     }
     return false;
   }

@@ -23,7 +23,6 @@ export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--disable-infobars',
   '--disable-notifications',
   '--use-fake-ui-for-media-stream',
-  '--use-fake-device-for-media-stream',
   '--autoplay-policy=no-user-gesture-required',
   '--disable-blink-features=AutomationControlled',
   '--disable-dev-shm-usage',

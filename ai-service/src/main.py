@@ -2,8 +2,9 @@ import os
 import shutil
 import tempfile
 import logging
+import asyncio
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Set
 
 # Patch PyAV 14+ compatibility for faster-whisper
 try:
@@ -194,10 +195,12 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     buffer = bytearray()
     chunk_sample_rate = 16000
     bytes_per_sample = 2
-    # 3.5 second window for streaming transcription chunks
-    window_bytes = int(chunk_sample_rate * bytes_per_sample * 3.5)
+    # 2.5 second window for streaming transcription chunks
+    window_bytes = int(chunk_sample_rate * bytes_per_sample * 2.5)
     last_emitted_ms = 0
     active_speaker = "Speaker 1"
+    known_speakers: Set[str] = set()
+    initial_prompt: Optional[str] = None
 
     try:
         while True:
@@ -208,14 +211,20 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                 if len(buffer) >= 16000:
                     pcm_to_process = bytes(buffer)
                     buffer.clear()
-                    segments = transcriber.transcribe_pcm_stream(pcm_to_process, meeting_id, chunk_sample_rate)
+                    segments = transcriber.transcribe_pcm_stream(
+                        pcm_to_process,
+                        meeting_id,
+                        chunk_sample_rate,
+                        speaker=active_speaker,
+                        initial_prompt=initial_prompt,
+                    )
                     for seg in segments:
                         start_ms = last_emitted_ms + seg.start_time_ms
                         end_ms = last_emitted_ms + seg.end_time_ms
                         event = {
                             "event": "TRANSCRIPT_SEGMENT",
                             "meeting_id": meeting_id,
-                            "speaker": active_speaker,
+                            "speaker": seg.speaker or active_speaker,
                             "text": seg.text,
                             "start_time_ms": start_ms,
                             "end_time_ms": end_ms,
@@ -233,14 +242,20 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                     pcm_to_process = bytes(buffer)
                     buffer.clear()
 
-                    segments = transcriber.transcribe_pcm_stream(pcm_to_process, meeting_id, chunk_sample_rate)
+                    segments = transcriber.transcribe_pcm_stream(
+                        pcm_to_process,
+                        meeting_id,
+                        chunk_sample_rate,
+                        speaker=active_speaker,
+                        initial_prompt=initial_prompt,
+                    )
                     for seg in segments:
                         start_ms = last_emitted_ms + seg.start_time_ms
                         end_ms = last_emitted_ms + seg.end_time_ms
                         event = {
                             "event": "TRANSCRIPT_SEGMENT",
                             "meeting_id": meeting_id,
-                            "speaker": active_speaker,
+                            "speaker": seg.speaker or active_speaker,
                             "text": seg.text,
                             "start_time_ms": start_ms,
                             "end_time_ms": end_ms,
@@ -255,18 +270,29 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                     payload = json.loads(message["text"])
                     msg_type = payload.get("type")
                     if msg_type == "SPEAKER_ACTIVE":
-                        active_speaker = payload.get("speaker") or active_speaker
+                        candidate = payload.get("speaker")
+                        if candidate and isinstance(candidate, str):
+                            active_speaker = candidate.strip()
+                            known_speakers.add(active_speaker)
+                            initial_prompt = f"Speakers: {', '.join(sorted(known_speakers))}. Spectra meeting transcription."
+                            logger.info("Meeting %s active speaker updated to '%s' (prompt: %s)", meeting_id, active_speaker, initial_prompt)
                     elif msg_type == "FLUSH" and len(buffer) > 3200:
                         pcm_to_process = bytes(buffer)
                         buffer.clear()
-                        segments = transcriber.transcribe_pcm_stream(pcm_to_process, meeting_id, chunk_sample_rate)
+                        segments = transcriber.transcribe_pcm_stream(
+                            pcm_to_process,
+                            meeting_id,
+                            chunk_sample_rate,
+                            speaker=active_speaker,
+                            initial_prompt=initial_prompt,
+                        )
                         for seg in segments:
                             start_ms = last_emitted_ms + seg.start_time_ms
                             end_ms = last_emitted_ms + seg.end_time_ms
                             event = {
                                 "event": "TRANSCRIPT_SEGMENT",
                                 "meeting_id": meeting_id,
-                                "speaker": active_speaker,
+                                "speaker": seg.speaker or active_speaker,
                                 "text": seg.text,
                                 "start_time_ms": start_ms,
                                 "end_time_ms": end_ms,

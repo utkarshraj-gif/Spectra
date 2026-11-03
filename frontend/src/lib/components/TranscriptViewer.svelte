@@ -3,12 +3,14 @@
 
   export let segments: TranscriptSegment[] = [];
 
-  function formatTime(seconds?: number, ms?: number) {
+  function formatTime(seconds?: any, ms?: any) {
     let sec = 0;
-    if (typeof ms === 'number' && !isNaN(ms)) {
-      sec = ms / 1000;
-    } else if (typeof seconds === 'number' && !isNaN(seconds)) {
-      sec = seconds;
+    const numMs = Number(ms);
+    const numSec = Number(seconds);
+    if (!isNaN(numMs) && numMs >= 0) {
+      sec = numMs / 1000;
+    } else if (!isNaN(numSec) && numSec >= 0) {
+      sec = numSec;
     }
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);

@@ -24,6 +24,7 @@ export class LiveAudioStreamer {
   private isConnected = false;
   private isClosed = false;
   private pendingChunks: Buffer[] = [];
+  private lastSpeaker: string | null = null;
   private options: AudioStreamerOptions;
 
   constructor(options: AudioStreamerOptions) {
@@ -39,6 +40,13 @@ export class LiveAudioStreamer {
       this.ws.onopen = () => {
         this.isConnected = true;
         console.log(`[LiveAudioStreamer] Connected to AI transcription stream: ${this.options.aiServiceWsUrl}`);
+
+        // Immediately transmit active speaker identity if observed before websocket connected
+        if (this.lastSpeaker && this.ws && this.ws.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.send(JSON.stringify({ type: 'SPEAKER_ACTIVE', speaker: this.lastSpeaker }));
+          } catch {}
+        }
 
         // Flush any buffered chunks
         while (this.pendingChunks.length > 0 && this.isConnected) {
@@ -92,6 +100,8 @@ export class LiveAudioStreamer {
   }
 
   public notifyActiveSpeaker(speaker: string): void {
+    if (!speaker) return;
+    this.lastSpeaker = speaker;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.send(JSON.stringify({ type: 'SPEAKER_ACTIVE', speaker }));

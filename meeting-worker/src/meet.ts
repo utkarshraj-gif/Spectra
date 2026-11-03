@@ -68,11 +68,17 @@ export class MeetingSession {
       } else {
         this.page = await this.context.newPage();
       }
-      this.page.setDefaultTimeout(config.navigationTimeoutMs);
+      const page = this.page;
+      if (!page) {
+        throw new Error('Failed to initialize page in context');
+      }
+      page.setDefaultTimeout(config.navigationTimeoutMs);
 
       // Navigate
       this.transitionTo('NAVIGATING', `Navigating to ${this.meetingUrl}`);
-      await this.page.goto(this.meetingUrl, { waitUntil: 'commit' });
+      await page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' }).catch(async () => {
+        await page.goto(this.meetingUrl, { waitUntil: 'commit' });
+      });
 
       // Pre-Join Setup
       this.transitionTo('PRE_JOIN', 'Configuring pre-join devices and identity');
@@ -214,18 +220,21 @@ export class MeetingSession {
     try {
       const bridgeFn = `__spectraSpeakerBridge_${this.meetingId.replace(/[^a-zA-Z0-9]/g, '_')}`;
       await this.page.exposeFunction(bridgeFn, (speakerName: string) => {
-        if (!speakerName || speakerName === this.currentSpeaker) return;
+        if (!speakerName) return;
+        const changed = speakerName !== this.currentSpeaker;
         this.currentSpeaker = speakerName;
         if (this.streamer) {
           this.streamer.notifyActiveSpeaker(speakerName);
         }
-        this.onEventCallback({
-          event: 'SPEAKER_ACTIVE',
-          meeting_id: this.meetingId,
-          state: this.state,
-          timestamp: Date.now(),
-          details: { speaker: speakerName },
-        });
+        if (changed) {
+          this.onEventCallback({
+            event: 'SPEAKER_ACTIVE',
+            meeting_id: this.meetingId,
+            state: this.state,
+            timestamp: Date.now(),
+            details: { speaker: speakerName },
+          });
+        }
       });
 
       await this.page.evaluate(
