@@ -19,6 +19,7 @@ export class MeetingSession {
   private monitorInterval: NodeJS.Timeout | null = null;
   private audioCaptureSession: AudioCaptureSession | null = null;
   private streamer: LiveAudioStreamer | null = null;
+  private currentSpeaker = '';
   private isDestroyed = false;
 
   constructor(
@@ -61,12 +62,17 @@ export class MeetingSession {
       this.context = context;
       this.profileDir = profileDir;
 
-      this.page = this.context.pages()[0] || (await this.context.newPage());
+      const pages = this.context.pages();
+      if (pages.length > 0 && pages[0].url() === 'about:blank') {
+        this.page = pages[0];
+      } else {
+        this.page = await this.context.newPage();
+      }
       this.page.setDefaultTimeout(config.navigationTimeoutMs);
 
       // Navigate
       this.transitionTo('NAVIGATING', `Navigating to ${this.meetingUrl}`);
-      await this.page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' });
+      await this.page.goto(this.meetingUrl, { waitUntil: 'commit' });
 
       // Pre-Join Setup
       this.transitionTo('PRE_JOIN', 'Configuring pre-join devices and identity');
@@ -85,6 +91,17 @@ export class MeetingSession {
       if (admitted) {
         this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
         this.startInMeetingMonitor();
+
+        // Open People panel to ensure participant names and microphone states are directly visible in DOM
+        try {
+          const peopleButton = this.page
+            .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
+            .first();
+          if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await peopleButton.click().catch(() => {});
+          }
+        } catch {}
+
         await this.startAudioCapture();
         await this.setupSpeakerObserver();
       } else {
@@ -144,6 +161,13 @@ export class MeetingSession {
         aiServiceWsUrl: wsUrl,
         meetingId: this.meetingId,
         onTranscriptSegment: (segment) => {
+          const effectiveSpeaker =
+            this.currentSpeaker && this.currentSpeaker !== 'Speaker 1'
+              ? this.currentSpeaker
+              : segment.speaker && segment.speaker !== 'Speaker 1'
+              ? segment.speaker
+              : this.currentSpeaker || 'Speaker';
+
           this.onEventCallback({
             event: 'TRANSCRIPT_SEGMENT',
             meeting_id: this.meetingId,
@@ -151,7 +175,7 @@ export class MeetingSession {
             timestamp: Date.now(),
             message: segment.text,
             details: {
-              speaker: segment.speaker,
+              speaker: effectiveSpeaker,
               text: segment.text,
               start_time_ms: segment.start_time_ms,
               end_time_ms: segment.end_time_ms,
@@ -164,7 +188,7 @@ export class MeetingSession {
 
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
-        silenceThreshold: 0.003,
+        silenceThreshold: 0.0008,
         onPcmChunk: ({ pcmBuffer }) => {
           if (this.streamer) {
             this.streamer.sendPcmChunk(pcmBuffer);
@@ -190,7 +214,8 @@ export class MeetingSession {
     try {
       const bridgeFn = `__spectraSpeakerBridge_${this.meetingId.replace(/[^a-zA-Z0-9]/g, '_')}`;
       await this.page.exposeFunction(bridgeFn, (speakerName: string) => {
-        if (!speakerName) return;
+        if (!speakerName || speakerName === this.currentSpeaker) return;
+        this.currentSpeaker = speakerName;
         if (this.streamer) {
           this.streamer.notifyActiveSpeaker(speakerName);
         }
@@ -203,25 +228,152 @@ export class MeetingSession {
         });
       });
 
-      await this.page.evaluate((fnName) => {
-        const observer = new MutationObserver(() => {
-          const speakingEl = document.querySelector(
-            '[data-is-speaking="true"], [aria-label*="speaking" i], div[jscontroller][data-participant-id]:has([class*="speaking"])'
-          );
-          if (speakingEl) {
-            const nameEl = speakingEl.querySelector('[data-self-name], span[title], div[title]');
-            const name = nameEl?.textContent?.trim() || speakingEl.getAttribute('aria-label');
-            if (name && typeof (window as any)[fnName] === 'function') {
-              (window as any)[fnName](name);
+      await this.page.evaluate(
+        ({ fnName, botName }) => {
+          const botLower = (botName || '').trim().toLowerCase();
+
+          function cleanCandidateName(raw: string): string {
+            return raw
+              .replace(/\s*\(You\)/gi, '')
+              .replace(/\s*\(Host\)/gi, '')
+              .replace(/\s*\(Meeting host\)/gi, '')
+              .replace(/\s*Meeting host/gi, '')
+              .replace(/\s*\(Presentation\)/gi, '')
+              .replace(/('s video|'s screen|presentation|video feed)$/gi, '')
+              .replace(/[\n\r]+/g, ' ')
+              .trim();
+          }
+
+          function isValidPersonName(name: string): boolean {
+            if (!name || name.length < 2 || name.length > 50) return false;
+            const lower = name.toLowerCase();
+            if (lower.includes(botLower) || botLower.includes(lower)) return false;
+            if (
+              /^(you|people|chat|activities|details|meeting details|contributors|in the meeting|add people|search for people|pin|mute|turn on|turn off|more options|leave call|everyone|\d+|\d+:\d+)$/i.test(
+                name
+              )
+            ) {
+              return false;
+            }
+            return true;
+          }
+
+          function scanAndReportSpeaker() {
+            const foundNames = new Set<string>();
+            let activeSpeaker: string | null = null;
+
+            // 1. Google Meet People Panel rows ([role="listitem"])
+            document.querySelectorAll('[role="listitem"]').forEach((row) => {
+              const rowText = row.textContent || '';
+              if (rowText.toLowerCase().includes(botLower)) return;
+
+              const spans = row.querySelectorAll('span, div');
+              for (const span of Array.from(spans)) {
+                if (span.children.length === 0) {
+                  const cleaned = cleanCandidateName(span.textContent || '');
+                  if (isValidPersonName(cleaned)) {
+                    foundNames.add(cleaned);
+
+                    // Check if unmuted or speaking in the row
+                    const isSpeaking = row.querySelector(
+                      '[data-is-speaking="true"], [aria-label*="speaking" i], [class*="speaking" i]'
+                    );
+                    const isUnmuted = row.querySelector(
+                      '[aria-label*="microphone" i]:not([aria-label*="off" i]):not([aria-label*="muted" i]), [data-is-muted="false"]'
+                    );
+                    if (isSpeaking || isUnmuted) {
+                      activeSpeaker = cleaned;
+                    }
+                    break;
+                  }
+                }
+              }
+            });
+
+            // 2. Video grid tiles & badges
+            const tileSelectors = [
+              'div[data-participant-id]',
+              'div[data-requested-participant-id]',
+              'div[data-tile-id]',
+              'div[data-allocation-index]',
+              'div[role="region"]',
+            ];
+
+            for (const sel of tileSelectors) {
+              document.querySelectorAll(sel).forEach((tile) => {
+                const selfName = tile.getAttribute('data-self-name');
+                if (selfName) {
+                  const cleaned = cleanCandidateName(selfName);
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+
+                const aria = tile.getAttribute('aria-label');
+                if (aria) {
+                  const cleaned = cleanCandidateName(aria);
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+
+                const badges = tile.querySelectorAll('span, div');
+                for (const badge of Array.from(badges)) {
+                  if (badge.children.length === 0) {
+                    const cleaned = cleanCandidateName(badge.textContent || '');
+                    if (isValidPersonName(cleaned)) {
+                      foundNames.add(cleaned);
+
+                      const isSpeaking = tile.querySelector(
+                        '[data-is-speaking="true"], [aria-label*="speaking" i], [jsname="B7I4Od"], [class*="speaking" i]'
+                      );
+                      if (isSpeaking) {
+                        activeSpeaker = cleaned;
+                      }
+                      break;
+                    }
+                  }
+                }
+              });
+            }
+
+            // 3. Search elements with (You) or (Host)
+            document.querySelectorAll('span, div').forEach((el) => {
+              if (el.children.length === 0) {
+                const txt = el.textContent || '';
+                if (txt.includes('(You)') || txt.includes('(Host)')) {
+                  const cleaned = cleanCandidateName(txt);
+                  if (isValidPersonName(cleaned)) {
+                    foundNames.add(cleaned);
+                  }
+                }
+              }
+            });
+
+            const namesList = Array.from(foundNames);
+
+            if (!activeSpeaker && namesList.length > 0) {
+              activeSpeaker = namesList[0];
+            }
+
+            if (activeSpeaker && typeof (window as any)[fnName] === 'function') {
+              (window as any)[fnName](activeSpeaker);
             }
           }
-        });
-        observer.observe(document.body, {
-          attributes: true,
-          subtree: true,
-          attributeFilter: ['data-is-speaking', 'class', 'aria-label'],
-        });
-      }, bridgeFn);
+
+          // Initial scan
+          scanAndReportSpeaker();
+
+          // Mutation observer
+          const observer = new MutationObserver(() => scanAndReportSpeaker());
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['data-is-speaking', 'aria-label', 'class', 'data-self-name'],
+          });
+
+          // Periodic scan every 1000ms
+          (window as any)[`__timer_${fnName}`] = setInterval(scanAndReportSpeaker, 1000);
+        },
+        { fnName: bridgeFn, botName: this.botName }
+      );
     } catch {
       // non-critical
     }
@@ -251,6 +403,16 @@ export class MeetingSession {
       this.streamer = null;
     }
 
+    if (this.page && !this.page.isClosed()) {
+      try {
+        const bridgeFn = `__spectraSpeakerBridge_${this.meetingId.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        await this.page.evaluate((fnName) => {
+          const tId = (window as any)[`__timer_${fnName}`];
+          if (tId) clearInterval(tId);
+        }, bridgeFn).catch(() => {});
+      } catch {}
+    }
+
     if (this.audioCaptureSession) {
       try {
         const savedPath = await this.audioCaptureSession.stop();
@@ -278,16 +440,13 @@ export class MeetingSession {
     }
 
     try {
-      if (this.context) {
-        await this.context.close().catch(() => {});
+      if (this.page && !this.page.isClosed()) {
+        await this.page.close().catch(() => {});
       }
     } finally {
       this.page = null;
       this.context = null;
-      if (this.profileDir) {
-        cleanupProfileDir(this.profileDir);
-        this.profileDir = null;
-      }
+      this.profileDir = null;
     }
   }
 }

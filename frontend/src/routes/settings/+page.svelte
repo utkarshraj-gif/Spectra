@@ -28,34 +28,59 @@
 </div>
 
 <style>
-  .settings-container { max-width: 650px; margin: 2rem auto; }
-  .settings-card {
-    background: #1e293b;
-    border: 1px solid #334155;
-    padding: 2rem;
-    border-radius: 12px;
+  .settings-container {
+    max-width: 650px;
+    margin: 2.5rem auto;
   }
-  h1 { margin-bottom: 1.5rem; }
-  h2 { margin-top: 0; margin-bottom: 1.25rem; font-size: 1.25rem; }
-  label { display: block; font-size: 0.875rem; margin-bottom: 0.5rem; color: #94a3b8; }
+  .settings-card {
+    background: var(--bg-elevated, #ffffff);
+    border: 1px solid var(--border, #e2e2e8);
+    box-shadow: var(--card-shadow, 0 4px 24px rgba(0, 0, 0, 0.06));
+    padding: 2.5rem;
+    border-radius: 16px;
+    color: var(--text, #131316);
+  }
+  h1 {
+    margin-bottom: 1.5rem;
+    color: var(--text, #131316);
+  }
+  h2 {
+    margin-top: 0;
+    margin-bottom: 1.25rem;
+    font-size: 1.25rem;
+    color: var(--text, #131316);
+  }
+  label {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text, #131316);
+  }
   input[type="text"], select {
     width: 100%;
-    padding: 0.75rem;
+    padding: 0.85rem 1rem;
     margin-bottom: 1.25rem;
-    background: #0f172a;
-    border: 1px solid #334155;
-    border-radius: 6px;
-    color: white;
+    background: var(--bg-muted, #f8fafc);
+    border: 1px solid var(--border, #cbd5e1);
+    border-radius: 8px;
+    color: var(--text, #131316);
     box-sizing: border-box;
+    transition: border-color 0.15s;
+  }
+  input[type="text"]:focus, select:focus {
+    outline: none;
+    border-color: #3b82f6;
   }
   .toggle-row {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     margin-bottom: 1.25rem;
+    color: var(--text, #131316);
   }
   .toggle-row label {
     margin-bottom: 0;
-    color: #e2e8f0;
+    color: var(--text, #131316);
   }
 </style>

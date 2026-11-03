@@ -194,14 +194,37 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     buffer = bytearray()
     chunk_sample_rate = 16000
     bytes_per_sample = 2
-    # 2.5 second window for streaming transcription chunks
-    window_bytes = int(chunk_sample_rate * bytes_per_sample * 2.5)
+    # 3.5 second window for streaming transcription chunks
+    window_bytes = int(chunk_sample_rate * bytes_per_sample * 3.5)
     last_emitted_ms = 0
     active_speaker = "Speaker 1"
 
     try:
         while True:
-            message = await websocket.receive()
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Flush pending speech buffer if at least 0.5s of speech has accumulated and paused
+                if len(buffer) >= 16000:
+                    pcm_to_process = bytes(buffer)
+                    buffer.clear()
+                    segments = transcriber.transcribe_pcm_stream(pcm_to_process, meeting_id, chunk_sample_rate)
+                    for seg in segments:
+                        start_ms = last_emitted_ms + seg.start_time_ms
+                        end_ms = last_emitted_ms + seg.end_time_ms
+                        event = {
+                            "event": "TRANSCRIPT_SEGMENT",
+                            "meeting_id": meeting_id,
+                            "speaker": active_speaker,
+                            "text": seg.text,
+                            "start_time_ms": start_ms,
+                            "end_time_ms": end_ms,
+                            "is_final": True,
+                        }
+                        await websocket.send_json(event)
+                    last_emitted_ms += int(len(pcm_to_process) / (chunk_sample_rate * bytes_per_sample) * 1000)
+                continue
+
             if "bytes" in message and message["bytes"]:
                 chunk = message["bytes"]
                 buffer.extend(chunk)

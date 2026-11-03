@@ -27,77 +27,49 @@ export class GoogleMeetAdapter implements PlatformAdapter {
   }
 
   async configurePreJoin(page: Page, botName: string): Promise<void> {
-    const GOOGLE_MIC_SELECTORS = [
-      '[aria-label*="Turn off microphone" i]',
-      'button[aria-label*="Turn off microphone" i]',
-      '[data-is-muted="false"]',
-    ];
-    for (const sel of GOOGLE_MIC_SELECTORS) {
-      try {
-        const mic = page.locator(sel).first();
-        if (await mic.isVisible({ timeout: 1000 })) {
-          await mic.click();
-          break;
-        }
-      } catch {}
-    }
+    // 1. Fast non-blocking check for "Rejoin" if reused URL
+    try {
+      const rejoinBtn = page.locator('button:has-text("Rejoin")').first();
+      if (await rejoinBtn.isVisible({ timeout: 200 }).catch(() => false)) {
+        await rejoinBtn.click({ timeout: 1000 }).catch(() => {});
+      }
+    } catch {}
 
-    const GOOGLE_CAM_SELECTORS = [
-      '[aria-label*="Turn off camera" i]',
-      'button[aria-label*="Turn off camera" i]',
-      'button[aria-label*="Turn off video" i]',
-    ];
-    for (const sel of GOOGLE_CAM_SELECTORS) {
-      try {
-        const cam = page.locator(sel).first();
-        if (await cam.isVisible({ timeout: 1000 })) {
-          await cam.click();
-          break;
-        }
-      } catch {}
-    }
+    // 2. Instant hardware mute shortcuts for Google Meet
+    try {
+      await page.keyboard.press('Control+e');
+      await page.keyboard.press('Control+d');
+    } catch {}
 
-    const GOOGLE_NAME_INPUT_SELECTORS = [
-      'input[jsname][type="text"]',
-      'input[type="text"]:not([aria-hidden="true"])',
-      'div[jscontroller] input[type="text"]',
-      'input[type="text"][aria-label="Your name"]',
-      'input[placeholder*="name" i]',
-    ];
-    for (const sel of GOOGLE_NAME_INPUT_SELECTORS) {
-      try {
-        const nameInput = page.locator(sel).first();
-        if (await nameInput.isVisible({ timeout: 1000 })) {
-          await nameInput.fill(botName);
-          break;
-        }
-      } catch {}
-    }
+    // 3. Fast non-blocking check for guest identity input
+    try {
+      const nameInput = page
+        .locator('input[aria-label="Your name"], input[jsname][type="text"], input[type="text"]:not([aria-hidden="true"])')
+        .first();
+      if (await nameInput.isVisible({ timeout: 300 }).catch(() => false)) {
+        await nameInput.fill(botName);
+      }
+    } catch {}
   }
 
   async submitJoinRequest(page: Page): Promise<void> {
-    const GOOGLE_JOIN_BUTTON_SELECTORS = [
-      '//button[.//span[text()="Ask to join"]]',
-      'button:has-text("Ask to join")',
-      'button:has-text("Join now")',
-      'button:has-text("Switch here")',
-      'button:has-text("Join")',
-      'button[jsname]:not([aria-label]):has(span)',
-    ];
+    // Fast check if already admitted
+    const inMeeting = await page
+      .locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [data-participant-id]')
+      .first()
+      .isVisible({ timeout: 100 })
+      .catch(() => false);
+    if (inMeeting) return;
 
-    for (const sel of GOOGLE_JOIN_BUTTON_SELECTORS) {
-      const btn = page.locator(sel).first();
-      try {
-        if (await btn.isVisible({ timeout: 1000 })) {
-          await btn.click();
-          return;
-        }
-      } catch {}
-    }
+    // Unified reactive locator resolving immediately the moment ANY valid CTA appears
+    const primaryCta = page
+      .locator(
+        'button:has-text("Ask to join"), button:has-text("Join now"), button:has-text("Rejoin"), button:has-text("Switch here"), button:has-text("Join")'
+      )
+      .first();
 
-    const primaryCta = page.locator(GOOGLE_JOIN_BUTTON_SELECTORS.join(', ')).first();
-    await primaryCta.waitFor({ state: 'visible', timeout: 10000 });
-    await primaryCta.click();
+    await primaryCta.waitFor({ state: 'visible', timeout: 15000 });
+    await primaryCta.click({ timeout: 2000 });
   }
 
   async waitForAdmission(

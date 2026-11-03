@@ -2,6 +2,7 @@ import http from 'http';
 import { URL } from 'url';
 import { config } from './config.js';
 import { GoogleMeetSession } from './meet.js';
+import { prewarmBrowserContext } from './browser.js';
 import { SessionStatusEvent, StartSessionPayload, StopSessionPayload } from './types.js';
 
 const sessions = new Map<string, GoogleMeetSession>();
@@ -204,6 +205,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(config.port, () => {
   console.log(`[MeetingWorker] Service listening on port ${config.port}`);
+  prewarmBrowserContext().catch((err) => {
+    console.warn('[MeetingWorker] Browser pre-warm warning:', err);
+  });
 });
 
 // Graceful process shutdown

@@ -145,18 +145,54 @@ class WhisperTranscriber:
         try:
             import numpy as np
             audio_data = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+            # 1. Root Mean Square (RMS) energy silence gate (blocks true ambient noise without clipping normal speech)
+            rms = float(np.sqrt(np.mean(audio_data ** 2)))
+            if rms < 0.0012:
+                # Ambient silence or background line noise - skip transcription to prevent hallucination
+                return []
+
+            # 2. Transcribe chunk with hallucination suppression settings
             segments_gen, _ = model.transcribe(
                 audio_data,
                 beam_size=3,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.6,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=300),
+                vad_parameters=dict(min_silence_duration_ms=350),
                 language="en",
             )
+
+            # Common Whisper phantom hallucination phrases triggered by low noise/silence
+            SILENCE_HALLUCINATIONS = {
+                "thank you", "thank you sir", "thank you very much", "thanks", "thanks for watching",
+                "bye", "goodbye", "you", "so", "subscribe", "subtitles by", "translated by",
+                "close shot in", "mute mute mute", "mute, mute, mute, hello, are you", "hey what up john",
+                "hey, what up, john",
+            }
+
             segments: List[SegmentResponse] = []
             for idx, s in enumerate(segments_gen):
                 text = s.text.strip()
                 if not text:
                     continue
+
+                # Drop segments with high probability of no speech
+                no_speech_prob = getattr(s, "no_speech_prob", 0.0)
+                if no_speech_prob > 0.65:
+                    continue
+
+                # Drop heavily degraded gibberish segments
+                avg_logprob = getattr(s, "avg_logprob", 0.0)
+                if avg_logprob < -1.8:
+                    continue
+
+                # Drop silence hallucination phrases
+                cleaned = text.lower().strip(" .,!?;:")
+                if cleaned in SILENCE_HALLUCINATIONS and (no_speech_prob > 0.25 or rms < 0.012):
+                    continue
+
                 segments.append(
                     SegmentResponse(
                         id=idx,
