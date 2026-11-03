@@ -220,6 +220,7 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     active_speech_frames = 0
     utterance_start_ms = 0
     total_stream_bytes = 0
+    session_start_time = asyncio.get_event_loop().time()
 
     active_speaker = "Speaker 1"
     known_speakers: Set[str] = set()
@@ -293,7 +294,10 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                     frame = bytes(raw_queue[:FRAME_BYTES])
                     del raw_queue[:FRAME_BYTES]
 
-                    frame_time_ms = int(total_stream_bytes / bytes_per_ms)
+                    # Calculate wall-clock timestamp relative to meeting session start
+                    wall_ms = int((asyncio.get_event_loop().time() - session_start_time) * 1000)
+                    stream_ms = int(total_stream_bytes / bytes_per_ms)
+                    frame_time_ms = max(wall_ms, stream_ms)
                     total_stream_bytes += FRAME_BYTES
                     rms = pcm_frame_rms(frame)
 
@@ -337,6 +341,8 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                                 known_speakers.add(active_speaker)
                                 initial_prompt = f"Speakers: {', '.join(sorted(known_speakers))}. Spectra meeting transcription."
                                 logger.info("Meeting %s active speaker changed to '%s'", meeting_id, active_speaker)
+                    elif msg_type == "PING":
+                        await websocket.send_json({"event": "PONG", "timestamp": payload.get("timestamp")})
                     elif msg_type == "FLUSH":
                         if speech_started and active_speech_frames >= MIN_SPEECH_FRAMES:
                             await flush_active_utterance()
@@ -351,4 +357,5 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
             except Exception:
                 pass
     except Exception as exc:
-        logger.error("WebSocket error for meeting %s: %s", meeting_id, exc)
+        if "disconnect message has been received" not in str(exc):
+            logger.error("WebSocket error for meeting %s: %s", meeting_id, exc)

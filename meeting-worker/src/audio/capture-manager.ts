@@ -1,5 +1,6 @@
 /**
  * capture-manager.ts — Enterprise-grade Web Audio Worklet capture manager for Google Meet.
+ * Includes auto-resume on Chrome AudioContext sleep and active stream reconnect.
  */
 
 import path from 'path';
@@ -10,7 +11,7 @@ import { float32ToInt16Pcm, WavFileWriter } from './wav.js';
 export interface AudioCaptureOptions {
   meetingId: string;
   outputDirectory?: string;
-  silenceThreshold?: number; // Minimum RMS amplitude (e.g. 0.003) to filter out background noise
+  silenceThreshold?: number; // Minimum RMS amplitude to filter background room noise
   onPcmChunk?: (chunk: { streamIndex: number; pcmBuffer: Buffer; timestamp: number }) => void;
 }
 
@@ -28,7 +29,7 @@ export async function startMeetingAudioCapture(
   const outDir = options.outputDirectory || path.resolve(process.cwd(), '../recordings');
   const filePath = path.join(outDir, `${meetingId}.wav`);
   const wavWriter = new WavFileWriter(filePath);
-  const silenceThreshold = options.silenceThreshold ?? 0.003;
+  const silenceThreshold = options.silenceThreshold ?? 0.0008;
 
   let streamCount = 0;
   let totalChunksReceived = 0;
@@ -77,8 +78,7 @@ export async function startMeetingAudioCapture(
     }
   );
 
-  // 2. Inject the AudioWorklet runner into the page context as clean self-contained JS
-  // (Prevents tsx/esbuild bundler __name helper injection inside browser context)
+  // 2. Inject the AudioWorklet runner into the page context
   const injectionScript = `
     (async function(opts) {
       const g = window;
@@ -110,6 +110,13 @@ export async function startMeetingAudioCapture(
           if (ctx.state === 'suspended') {
             await ctx.resume().catch(function() {});
           }
+
+          // Auto-resume if Chrome suspends context during long idle or silence
+          ctx.onstatechange = function() {
+            if (ctx.state === 'suspended' && g.__spectraCaptureRunning) {
+              ctx.resume().catch(function() {});
+            }
+          };
 
           await ctx.audioWorklet.addModule(workletBlobUrl);
 
@@ -167,6 +174,17 @@ export async function startMeetingAudioCapture(
 
       async function scanAndConnect() {
         if (!g.__spectraCaptureRunning) return;
+
+        // Auto-resume any audio context that Chrome suspended during long idle breaks
+        if (Array.isArray(g.__spectraContexts)) {
+          for (let i = 0; i < g.__spectraContexts.length; i++) {
+            const c = g.__spectraContexts[i];
+            if (c && c.state === 'suspended') {
+              c.resume().catch(function() {});
+            }
+          }
+        }
+
         const elements = findMediaElements();
         for (let i = 0; i < elements.length; i++) {
           const connected = await connectStreamElement(elements[i], streamIndex);
@@ -175,7 +193,7 @@ export async function startMeetingAudioCapture(
       }
 
       await scanAndConnect();
-      g.__spectraScanInterval = setInterval(scanAndConnect, 8000);
+      g.__spectraScanInterval = setInterval(scanAndConnect, 3000);
     })(${JSON.stringify({
       workletCode: WORKLET_SOURCE_CODE,
       workletName: PCM_WORKLET_NAME,

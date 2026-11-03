@@ -1,5 +1,6 @@
 /**
- * streamer.ts — Real-time bi-directional audio streaming client to Spectra AI Service.
+ * streamer.ts — Resilient bi-directional audio streaming client to Spectra AI Service.
+ * Includes auto-reconnect with exponential backoff and active ping keepalive.
  */
 
 export interface LiveTranscriptEvent {
@@ -26,6 +27,9 @@ export class LiveAudioStreamer {
   private pendingChunks: Buffer[] = [];
   private lastSpeaker: string | null = null;
   private options: AudioStreamerOptions;
+  private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private pingInterval: NodeJS.Timeout | null = null;
 
   constructor(options: AudioStreamerOptions) {
     this.options = options;
@@ -33,13 +37,21 @@ export class LiveAudioStreamer {
 
   public connect(): void {
     if (this.isClosed) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
 
     try {
       this.ws = new WebSocket(this.options.aiServiceWsUrl);
 
       this.ws.onopen = () => {
         this.isConnected = true;
+        this.reconnectAttempts = 0;
         console.log(`[LiveAudioStreamer] Connected to AI transcription stream: ${this.options.aiServiceWsUrl}`);
+
+        // Start active 10s ping keepalive to prevent idle timeout during long silences/breaks
+        this.startPingKeepalive();
 
         // Immediately transmit active speaker identity if observed before websocket connected
         if (this.lastSpeaker && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -64,23 +76,57 @@ export class LiveAudioStreamer {
             this.options.onTranscriptSegment(data as LiveTranscriptEvent);
           }
         } catch {
-          // ignore non-JSON messages
+          // ignore non-JSON messages (e.g. pong)
         }
       };
 
       this.ws.onerror = (err) => {
         console.warn(`[LiveAudioStreamer] WebSocket warning for meeting ${this.options.meetingId}:`, err);
-        if (this.options.onError) {
-          this.options.onError(new Error('AI Service WebSocket error'));
-        }
       };
 
       this.ws.onclose = () => {
         this.isConnected = false;
-        console.log(`[LiveAudioStreamer] Stream closed for meeting ${this.options.meetingId}`);
+        this.stopPingKeepalive();
+        if (!this.isClosed) {
+          console.log(`[LiveAudioStreamer] Stream dropped for meeting ${this.options.meetingId}. Auto-reconnecting...`);
+          this.scheduleReconnect();
+        }
       };
     } catch (err) {
       console.warn(`[LiveAudioStreamer] Could not open WebSocket connection:`, err);
+      if (!this.isClosed) {
+        this.scheduleReconnect();
+      }
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.isClosed || this.reconnectTimer) return;
+    const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 8000);
+    this.reconnectAttempts++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.isClosed) {
+        this.connect();
+      }
+    }, delay);
+  }
+
+  private startPingKeepalive(): void {
+    this.stopPingKeepalive();
+    this.pingInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({ type: 'PING', timestamp: Date.now() }));
+        } catch {}
+      }
+    }, 10000);
+  }
+
+  private stopPingKeepalive(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
     }
   }
 
@@ -93,8 +139,8 @@ export class LiveAudioStreamer {
       } catch (err) {
         console.error(`[LiveAudioStreamer] Error sending chunk:`, err);
       }
-    } else if (this.pendingChunks.length < 50) {
-      // Buffer up to ~12.5 seconds of audio while reconnecting
+    } else if (this.pendingChunks.length < 100) {
+      // Buffer up to ~25 seconds of audio while reconnecting
       this.pendingChunks.push(pcmBuffer);
     }
   }
@@ -114,6 +160,11 @@ export class LiveAudioStreamer {
   public close(): void {
     this.isClosed = true;
     this.isConnected = false;
+    this.stopPingKeepalive();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       try {
         if (this.ws.readyState === WebSocket.OPEN) {
