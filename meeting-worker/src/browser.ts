@@ -115,7 +115,14 @@ export async function createMeetingContext(
             err.name = 'NotFoundError';
             throw err;
           }
-          return origGUM(constraints);
+          const stream = await origGUM(constraints);
+          // Disable outgoing microphone tracks so bot never transmits audio
+          if (stream && stream.getAudioTracks) {
+            stream.getAudioTracks().forEach((t) => {
+              t.enabled = false;
+            });
+          }
+          return stream;
         };
       }
     } catch {}

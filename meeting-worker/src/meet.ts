@@ -3,7 +3,7 @@ import { createMeetingContext, cleanupProfileDir } from './browser.js';
 import { config } from './config.js';
 import { MeetingState, SessionStatusEvent, PlatformAdapter } from './types.js';
 import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile, LiveAudioStreamer } from './audio/index.js';
-import { getAdapterForUrl } from './platforms/index.js';
+import { getAdapterForUrl, ensureMicrophoneMuted } from './platforms/index.js';
 
 export class MeetingSession {
   public readonly meetingId: string;
@@ -96,6 +96,10 @@ export class MeetingSession {
 
       if (admitted) {
         this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
+
+        // Enforce muted microphone immediately upon entering meeting room
+        await ensureMicrophoneMuted(this.page).catch(() => {});
+
         this.startInMeetingMonitor();
 
         // Open People panel to ensure participant names and microphone states are directly visible in DOM
@@ -164,7 +168,18 @@ export class MeetingSession {
           }
         }
 
-        // 2. Check participant count
+        // 2. Ensure bot's own microphone remains muted
+        const inMeetingMicBtn = this.page
+          .locator(
+            'button[aria-label*="Turn off microphone" i], div[role="button"][aria-label*="Turn off microphone" i], [data-is-muted="false"][aria-label*="mic" i]'
+          )
+          .first();
+        if (await inMeetingMicBtn.isVisible({ timeout: 50 }).catch(() => false)) {
+          console.log('[MeetingSession] Bot microphone detected active in-meeting; auto-muting now.');
+          await inMeetingMicBtn.click().catch(() => {});
+        }
+
+        // 3. Check participant count
         const participantCount = await this.page.evaluate((botName) => {
           const botLower = (botName || '').trim().toLowerCase();
 
