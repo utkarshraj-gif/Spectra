@@ -3,6 +3,9 @@ import shutil
 import tempfile
 import logging
 import asyncio
+import collections
+import json
+import numpy as np
 from contextlib import asynccontextmanager
 from typing import Optional, Set
 
@@ -182,127 +185,170 @@ async def create_transcription(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def pcm_frame_rms(pcm_bytes: bytes) -> float:
+    """Calculates RMS audio energy from raw 16-bit mono PCM."""
+    if not pcm_bytes:
+        return 0.0
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    return float(np.sqrt(np.mean(samples ** 2)))
+
+
 @app.websocket("/ws/transcribe/{meeting_id}")
 async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
-    """Real-time bi-directional streaming endpoint.
+    """Real-time bi-directional streaming endpoint with VAD Utterance Segmentation.
     Accepts 16kHz 16-bit mono PCM binary frames from worker.
-    Accumulates audio into an utterance buffer, transcribes upon speech boundaries,
-    and returns timestamped segments in real-time.
+    Segments speech using energy-based Voice Activity Detection and natural pause endpointing (1.2s),
+    auto-flushes on speaker changes, and returns conversational timestamped segments in real time.
     """
     await websocket.accept()
     logger.info("WebSocket connected for real-time transcription of meeting %s", meeting_id)
 
-    buffer = bytearray()
     chunk_sample_rate = 16000
     bytes_per_sample = 2
-    # 2.5 second window for streaming transcription chunks
-    window_bytes = int(chunk_sample_rate * bytes_per_sample * 2.5)
-    last_emitted_ms = 0
+    bytes_per_ms = 32  # 16000 * 2 / 1000 = 32 bytes per millisecond
+    FRAME_BYTES = 3200  # 100ms per audio evaluation frame
+    SILENCE_RMS_THRESHOLD = 0.0018  # speech vs background noise energy threshold
+    PAUSE_FRAMES_ENDPOINT = 12  # 1.2s silence pause endpoints a natural speech utterance
+    MIN_SPEECH_FRAMES = 4  # 400ms min active speech to eliminate clicks and taps
+    MAX_UTTERANCE_BYTES = chunk_sample_rate * bytes_per_sample * 15  # 15s max utterance chunk
+
+    raw_queue = bytearray()
+    preroll_frames = collections.deque(maxlen=3)  # 300ms pre-roll to preserve leading consonants
+    utterance_buffer = bytearray()
+    speech_started = False
+    consecutive_silence_frames = 0
+    active_speech_frames = 0
+    utterance_start_ms = 0
+    total_stream_bytes = 0
+
     active_speaker = "Speaker 1"
     known_speakers: Set[str] = set()
     initial_prompt: Optional[str] = None
 
+    async def flush_active_utterance():
+        nonlocal speech_started, consecutive_silence_frames, active_speech_frames, utterance_start_ms
+        if len(utterance_buffer) == 0:
+            return
+        pcm_to_process = bytes(utterance_buffer)
+        utterance_buffer.clear()
+        speech_started = False
+        consecutive_silence_frames = 0
+        speech_frames_snapshot = active_speech_frames
+        active_speech_frames = 0
+
+        # Discard if active speech duration is less than min threshold (e.g. mic click or tap)
+        if speech_frames_snapshot < MIN_SPEECH_FRAMES:
+            return
+
+        start_ms = utterance_start_ms
+        duration_ms = int(len(pcm_to_process) / bytes_per_ms)
+        end_ms = start_ms + duration_ms
+
+        try:
+            # Run faster-whisper in background thread pool to prevent blocking asyncio loop
+            segments = await asyncio.to_thread(
+                transcriber.transcribe_pcm_stream,
+                pcm_to_process,
+                meeting_id,
+                chunk_sample_rate,
+                speaker=active_speaker,
+                initial_prompt=initial_prompt,
+            )
+            for seg in segments:
+                text = seg.text.strip()
+                if not text:
+                    continue
+                seg_start = start_ms + seg.start_time_ms
+                seg_end = min(end_ms, start_ms + seg.end_time_ms)
+                if seg_end <= seg_start:
+                    seg_end = seg_start + 1000
+                event = {
+                    "event": "TRANSCRIPT_SEGMENT",
+                    "meeting_id": meeting_id,
+                    "speaker": seg.speaker or active_speaker,
+                    "text": text,
+                    "start_time_ms": seg_start,
+                    "end_time_ms": seg_end,
+                    "is_final": True,
+                }
+                await websocket.send_json(event)
+        except Exception as err:
+            logger.error("Error transcribing utterance for meeting %s: %s", meeting_id, err)
+
     try:
         while True:
             try:
-                message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
+                # Wait for next websocket message (max 0.2s so natural silence pause can trigger)
+                message = await asyncio.wait_for(websocket.receive(), timeout=0.2)
             except asyncio.TimeoutError:
-                # Flush pending speech buffer if at least 0.5s of speech has accumulated and paused
-                if len(buffer) >= 16000:
-                    pcm_to_process = bytes(buffer)
-                    buffer.clear()
-                    segments = transcriber.transcribe_pcm_stream(
-                        pcm_to_process,
-                        meeting_id,
-                        chunk_sample_rate,
-                        speaker=active_speaker,
-                        initial_prompt=initial_prompt,
-                    )
-                    for seg in segments:
-                        start_ms = last_emitted_ms + seg.start_time_ms
-                        end_ms = last_emitted_ms + seg.end_time_ms
-                        event = {
-                            "event": "TRANSCRIPT_SEGMENT",
-                            "meeting_id": meeting_id,
-                            "speaker": seg.speaker or active_speaker,
-                            "text": seg.text,
-                            "start_time_ms": start_ms,
-                            "end_time_ms": end_ms,
-                            "is_final": True,
-                        }
-                        await websocket.send_json(event)
-                    last_emitted_ms += int(len(pcm_to_process) / (chunk_sample_rate * bytes_per_sample) * 1000)
+                # If currently in speech and silence frames have reached the pause endpoint threshold:
+                if speech_started and consecutive_silence_frames >= PAUSE_FRAMES_ENDPOINT:
+                    await flush_active_utterance()
                 continue
 
             if "bytes" in message and message["bytes"]:
-                chunk = message["bytes"]
-                buffer.extend(chunk)
+                raw_queue.extend(message["bytes"])
 
-                if len(buffer) >= window_bytes:
-                    pcm_to_process = bytes(buffer)
-                    buffer.clear()
+                while len(raw_queue) >= FRAME_BYTES:
+                    frame = bytes(raw_queue[:FRAME_BYTES])
+                    del raw_queue[:FRAME_BYTES]
 
-                    segments = transcriber.transcribe_pcm_stream(
-                        pcm_to_process,
-                        meeting_id,
-                        chunk_sample_rate,
-                        speaker=active_speaker,
-                        initial_prompt=initial_prompt,
-                    )
-                    for seg in segments:
-                        start_ms = last_emitted_ms + seg.start_time_ms
-                        end_ms = last_emitted_ms + seg.end_time_ms
-                        event = {
-                            "event": "TRANSCRIPT_SEGMENT",
-                            "meeting_id": meeting_id,
-                            "speaker": seg.speaker or active_speaker,
-                            "text": seg.text,
-                            "start_time_ms": start_ms,
-                            "end_time_ms": end_ms,
-                            "is_final": True,
-                        }
-                        await websocket.send_json(event)
-                    last_emitted_ms += int(len(pcm_to_process) / (chunk_sample_rate * bytes_per_sample) * 1000)
+                    frame_time_ms = int(total_stream_bytes / bytes_per_ms)
+                    total_stream_bytes += FRAME_BYTES
+                    rms = pcm_frame_rms(frame)
+
+                    if rms >= SILENCE_RMS_THRESHOLD:
+                        if not speech_started:
+                            speech_started = True
+                            active_speech_frames = 0
+                            consecutive_silence_frames = 0
+                            preroll_bytes = b"".join(preroll_frames)
+                            utterance_buffer.extend(preroll_bytes)
+                            utterance_start_ms = max(0, frame_time_ms - int(len(preroll_bytes) / bytes_per_ms))
+                            preroll_frames.clear()
+
+                        utterance_buffer.extend(frame)
+                        active_speech_frames += 1
+                        consecutive_silence_frames = 0
+
+                        if len(utterance_buffer) >= MAX_UTTERANCE_BYTES:
+                            await flush_active_utterance()
+                    else:
+                        if speech_started:
+                            utterance_buffer.extend(frame)
+                            consecutive_silence_frames += 1
+                            if consecutive_silence_frames >= PAUSE_FRAMES_ENDPOINT:
+                                await flush_active_utterance()
+                        else:
+                            preroll_frames.append(frame)
 
             elif "text" in message and message["text"]:
-                import json
                 try:
                     payload = json.loads(message["text"])
                     msg_type = payload.get("type")
                     if msg_type == "SPEAKER_ACTIVE":
                         candidate = payload.get("speaker")
                         if candidate and isinstance(candidate, str):
-                            active_speaker = candidate.strip()
-                            known_speakers.add(active_speaker)
-                            initial_prompt = f"Speakers: {', '.join(sorted(known_speakers))}. Spectra meeting transcription."
-                            logger.info("Meeting %s active speaker updated to '%s' (prompt: %s)", meeting_id, active_speaker, initial_prompt)
-                    elif msg_type == "FLUSH" and len(buffer) > 3200:
-                        pcm_to_process = bytes(buffer)
-                        buffer.clear()
-                        segments = transcriber.transcribe_pcm_stream(
-                            pcm_to_process,
-                            meeting_id,
-                            chunk_sample_rate,
-                            speaker=active_speaker,
-                            initial_prompt=initial_prompt,
-                        )
-                        for seg in segments:
-                            start_ms = last_emitted_ms + seg.start_time_ms
-                            end_ms = last_emitted_ms + seg.end_time_ms
-                            event = {
-                                "event": "TRANSCRIPT_SEGMENT",
-                                "meeting_id": meeting_id,
-                                "speaker": seg.speaker or active_speaker,
-                                "text": seg.text,
-                                "start_time_ms": start_ms,
-                                "end_time_ms": end_ms,
-                                "is_final": True,
-                            }
-                            await websocket.send_json(event)
+                            candidate = candidate.strip()
+                            if candidate and candidate != active_speaker:
+                                if speech_started and active_speech_frames >= MIN_SPEECH_FRAMES:
+                                    await flush_active_utterance()
+                                active_speaker = candidate
+                                known_speakers.add(active_speaker)
+                                initial_prompt = f"Speakers: {', '.join(sorted(known_speakers))}. Spectra meeting transcription."
+                                logger.info("Meeting %s active speaker changed to '%s'", meeting_id, active_speaker)
+                    elif msg_type == "FLUSH":
+                        if speech_started and active_speech_frames >= MIN_SPEECH_FRAMES:
+                            await flush_active_utterance()
                 except Exception as e:
                     logger.warning("Error parsing websocket JSON message: %s", e)
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for meeting %s", meeting_id)
+        if speech_started and active_speech_frames >= MIN_SPEECH_FRAMES:
+            try:
+                await flush_active_utterance()
+            except Exception:
+                pass
     except Exception as exc:
         logger.error("WebSocket error for meeting %s: %s", meeting_id, exc)

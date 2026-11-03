@@ -100,11 +100,16 @@ export class MeetingSession {
 
         // Open People panel to ensure participant names and microphone states are directly visible in DOM
         try {
-          const peopleButton = this.page
-            .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
-            .first();
-          if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
-            await peopleButton.click().catch(() => {});
+          const isPeoplePanelOpen = await this.page.evaluate(() => {
+            return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
+          });
+          if (!isPeoplePanelOpen) {
+            const peopleButton = this.page
+              .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
+              .first();
+            if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+              await peopleButton.click().catch(() => {});
+            }
           }
         } catch {}
 
@@ -308,7 +313,24 @@ export class MeetingSession {
           const botLower = (botName || '').trim().toLowerCase();
 
           function cleanCandidateName(raw: string): string {
-            return raw
+            let str = (raw || '').trim();
+            // 1. Strip Google Meet action phrases from pin/unpin or mic/camera controls
+            const unpinMatch = str.match(/(?:unpin|pin)\s+(.+?)\s+(?:from|to)\s+your\s+main\s+screen/i);
+            if (unpinMatch && unpinMatch[1]) {
+              str = unpinMatch[1];
+            }
+            const micMatch = str.match(/(?:mute|unmute)\s+(.+?)(?:'s|\s+microphone)/i);
+            if (micMatch && micMatch[1]) {
+              str = micMatch[1];
+            }
+
+            return str
+              .replace(/^(?:unpin|pin)\s+/i, '')
+              .replace(/\s+(?:from|to)\s+your\s+main\s+screen$/i, '')
+              .replace(/^(?:mute|unmute)\s+/i, '')
+              .replace(/\s+'s\s+microphone$/i, '')
+              .replace(/^(?:turn off|turn on)\s+/i, '')
+              .replace(/\s+'s\s+video$/i, '')
               .replace(/\s*\(You\)/gi, '')
               .replace(/\s*\(Host\)/gi, '')
               .replace(/\s*\(Meeting host\)/gi, '')
@@ -320,16 +342,19 @@ export class MeetingSession {
           }
 
           function isValidPersonName(name: string): boolean {
-            if (!name || name.length < 2 || name.length > 50) return false;
+            if (!name || name.length < 2 || name.length > 40) return false;
             const lower = name.toLowerCase();
             if (lower.includes(botLower) || botLower.includes(lower)) return false;
             if (
-              /^(you|people|chat|activities|details|meeting details|contributors|in the meeting|add people|search for people|pin|mute|turn on|turn off|more options|leave call|everyone|\d+|\d+:\d+)$/i.test(
+              /^(you|people|chat|activities|details|meeting details|contributors|in the meeting|add people|search for people|pin|unpin|mute|unmute|turn on|turn off|more options|leave call|everyone|\d+|\d+:\d+)$/i.test(
                 name
               )
             ) {
               return false;
             }
+            // Block lingering action phrases
+            if (/^(?:unpin|pin|mute|unmute|turn)\b/i.test(name)) return false;
+            if (/\b(?:from your main screen|to your main screen)\b/i.test(name)) return false;
             return true;
           }
 
@@ -337,7 +362,59 @@ export class MeetingSession {
             const foundNames = new Set<string>();
             let activeSpeaker: string | null = null;
 
-            // 1. Google Meet People Panel rows ([role="listitem"])
+            // 1. Google Meet Video grid tiles & badges (Checked first for active speaking indicators)
+            const tileSelectors = [
+              'div[data-participant-id]',
+              'div[data-requested-participant-id]',
+              'div[data-tile-id]',
+              'div[data-allocation-index]',
+              'div[role="region"]',
+            ];
+
+            for (const sel of tileSelectors) {
+              document.querySelectorAll(sel).forEach((tile) => {
+                // Direct tile name element (bottom-left label badge in Google Meet)
+                const nameBadge = tile.querySelector('div[class*="name" i], span[class*="name" i], [data-self-name]');
+                if (nameBadge) {
+                  const cleaned = cleanCandidateName(nameBadge.getAttribute('data-self-name') || nameBadge.textContent || '');
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+
+                const selfName = tile.getAttribute('data-self-name');
+                if (selfName) {
+                  const cleaned = cleanCandidateName(selfName);
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+
+                // Check visible text badges inside tile
+                const badges = tile.querySelectorAll('span, div');
+                for (const badge of Array.from(badges)) {
+                  if (badge.children.length === 0) {
+                    const cleaned = cleanCandidateName(badge.textContent || '');
+                    if (isValidPersonName(cleaned)) {
+                      foundNames.add(cleaned);
+
+                      const isSpeaking = tile.querySelector(
+                        '[data-is-speaking="true"], [aria-label*="speaking" i], [jsname="B7I4Od"], [class*="speaking" i]'
+                      );
+                      if (isSpeaking) {
+                        activeSpeaker = cleaned;
+                      }
+                      break;
+                    }
+                  }
+                }
+
+                // Aria-label fallback only if direct text was not found
+                const aria = tile.getAttribute('aria-label');
+                if (aria) {
+                  const cleaned = cleanCandidateName(aria);
+                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
+                }
+              });
+            }
+
+            // 2. Google Meet People Panel rows ([role="listitem"])
             document.querySelectorAll('[role="listitem"]').forEach((row) => {
               const rowText = row.textContent || '';
               if (rowText.toLowerCase().includes(botLower)) return;
@@ -364,49 +441,6 @@ export class MeetingSession {
                 }
               }
             });
-
-            // 2. Video grid tiles & badges
-            const tileSelectors = [
-              'div[data-participant-id]',
-              'div[data-requested-participant-id]',
-              'div[data-tile-id]',
-              'div[data-allocation-index]',
-              'div[role="region"]',
-            ];
-
-            for (const sel of tileSelectors) {
-              document.querySelectorAll(sel).forEach((tile) => {
-                const selfName = tile.getAttribute('data-self-name');
-                if (selfName) {
-                  const cleaned = cleanCandidateName(selfName);
-                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
-                }
-
-                const aria = tile.getAttribute('aria-label');
-                if (aria) {
-                  const cleaned = cleanCandidateName(aria);
-                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
-                }
-
-                const badges = tile.querySelectorAll('span, div');
-                for (const badge of Array.from(badges)) {
-                  if (badge.children.length === 0) {
-                    const cleaned = cleanCandidateName(badge.textContent || '');
-                    if (isValidPersonName(cleaned)) {
-                      foundNames.add(cleaned);
-
-                      const isSpeaking = tile.querySelector(
-                        '[data-is-speaking="true"], [aria-label*="speaking" i], [jsname="B7I4Od"], [class*="speaking" i]'
-                      );
-                      if (isSpeaking) {
-                        activeSpeaker = cleaned;
-                      }
-                      break;
-                    }
-                  }
-                }
-              });
-            }
 
             // 3. Search elements with (You) or (Host)
             document.querySelectorAll('span, div').forEach((el) => {

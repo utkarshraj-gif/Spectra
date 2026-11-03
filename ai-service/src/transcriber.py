@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import wave
 import json
 import logging
@@ -15,8 +16,20 @@ SILENCE_HALLUCINATIONS = {
     "thank you", "thank you sir", "thank you very much", "thanks", "thanks for watching",
     "bye", "goodbye", "you", "so", "subscribe", "subtitles by", "translated by",
     "close shot in", "mute mute mute", "mute, mute, mute, hello, are you", "hey what up john",
-    "hey, what up, john",
+    "hey, what up, john", "pinker than",
 }
+
+def remove_repetitive_loops(text: str) -> str:
+    """Collapses runaway word or phrase repetitions like 'pinker than pinker than...'"""
+    if not text:
+        return ""
+    # Look for repeating phrase patterns (1 to 4 words repeated 3+ times)
+    pattern = r'\b([a-zA-Z0-9_\'-]+(?:\s+[a-zA-Z0-9_\'-]+){0,3})(?:\s+\1){2,}\b'
+    cleaned = re.sub(pattern, r'\1', text, flags=re.IGNORECASE)
+    # Strip degenerate long repeating sequences (3+ repeats of single word)
+    single_word_rep = r'\b(\w+)(?:\s+\1){2,}\b'
+    cleaned = re.sub(single_word_rep, r'\1', cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 class WhisperTranscriber:
     _instance: Optional["WhisperTranscriber"] = None
@@ -119,7 +132,8 @@ class WhisperTranscriber:
         max_end_time = 0.0
 
         for idx, s in enumerate(segments_gen):
-            text = s.text.strip()
+            raw_text = s.text.strip()
+            text = remove_repetitive_loops(raw_text)
             if not text:
                 continue
             start_ms = int(s.start * 1000)
@@ -204,6 +218,7 @@ class WhisperTranscriber:
                 with urllib.request.urlopen(req, timeout=3.0) as resp:
                     resp_data = json.loads(resp.read().decode())
                     text = resp_data.get("text", "").strip()
+                    text = remove_repetitive_loops(text)
                     if text:
                         cleaned = text.lower().strip(" .,!?;:")
                         if cleaned not in SILENCE_HALLUCINATIONS:
@@ -235,22 +250,27 @@ class WhisperTranscriber:
 
         try:
             # beam_size=1 (greedy decoding) provides 2.5x-3x speedup with INT8, matching Bolo's real-time latency
+            # repetition_penalty, no_repeat_ngram_size, and compression_ratio_threshold prevent looping hallucinations
             segments_gen, _ = model.transcribe(
                 audio_data,
                 beam_size=1,
                 temperature=0.0,
                 condition_on_previous_text=False,
                 initial_prompt=initial_prompt,
+                repetition_penalty=1.15,
+                no_repeat_ngram_size=3,
+                compression_ratio_threshold=2.2,
+                hallucination_silence_threshold=2.0,
                 no_speech_threshold=0.6,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=350),
+                vad_parameters=dict(min_silence_duration_ms=300),
                 language="en",
             )
 
             segments: List[SegmentResponse] = []
             for idx, s in enumerate(segments_gen):
-                text = s.text.strip()
-                if not text:
+                raw_text = s.text.strip()
+                if not raw_text:
                     continue
 
                 no_speech_prob = getattr(s, "no_speech_prob", 0.0)
@@ -259,6 +279,10 @@ class WhisperTranscriber:
 
                 avg_logprob = getattr(s, "avg_logprob", 0.0)
                 if avg_logprob < -1.8:
+                    continue
+
+                text = remove_repetitive_loops(raw_text)
+                if not text:
                     continue
 
                 cleaned = text.lower().strip(" .,!?;:")
