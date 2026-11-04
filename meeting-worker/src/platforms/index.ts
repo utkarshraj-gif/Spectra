@@ -1,5 +1,10 @@
 import type { Page } from 'playwright';
-import type { MeetingPlatform, PlatformAdapter, MeetingState } from '../types.js';
+import type { MeetingPlatform, PlatformAdapter, MeetingState, ParticipantEventPayload, ChatMessagePayload } from '../types.js';
+import { ZoomAdapter } from './zoom.js';
+import { TeamsAdapter } from './teams.js';
+
+export { ZoomAdapter } from './zoom.js';
+export { TeamsAdapter } from './teams.js';
 
 export class GoogleMeetAdapter implements PlatformAdapter {
   readonly platform: MeetingPlatform = 'google_meet';
@@ -155,7 +160,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         }
       }
 
-      // 2. Waiting Lobby Check (Must take precedence over ambiguous UI elements)
+      // 2. Waiting Lobby Check
       let isWaiting = false;
       for (const sel of GOOGLE_WAITING_INDICATORS) {
         if (await page.locator(sel).first().isVisible().catch(() => false)) {
@@ -170,7 +175,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         continue;
       }
 
-      // 3. In-Meeting Check (Only valid if NOT in waiting lobby)
+      // 3. In-Meeting Check
       for (const sel of GOOGLE_IN_CALL_INDICATORS) {
         if (await page.locator(sel).first().isVisible().catch(() => false)) {
           onStateChange('IN_MEETING', 'Admitted to Google Meet call');
@@ -178,7 +183,6 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         }
       }
 
-      // Fast reactive tick
       await page.waitForTimeout(300);
     }
     return false;
@@ -192,70 +196,101 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       }
     } catch {}
   }
-}
 
-export class ZoomAdapter implements PlatformAdapter {
-  readonly platform: MeetingPlatform = 'zoom';
-
-  matches(url: string): boolean {
-    return url.includes('zoom.us');
-  }
-
-  normalizeUrl(rawUrl: string): string {
-    let url = rawUrl.trim();
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = 'https://' + url;
-    }
-    // Web client join fallback
-    if (!url.includes('/wc/') && url.includes('/j/')) {
-      url = url.replace('/j/', '/wc/join/');
-    }
-    return url;
-  }
-
-  async configurePreJoin(page: Page, botName: string): Promise<void> {
-    try {
-      const nameInput = page.locator('input#inputname, input[name="inputname"], input[placeholder*="name" i]').first();
-      if (await nameInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await nameInput.fill(botName);
-      }
-    } catch {}
-  }
-
-  async submitJoinRequest(page: Page): Promise<void> {
-    try {
-      const joinBtn = page.locator('button#joinBtn, button:has-text("Join")').first();
-      if (await joinBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await joinBtn.click();
-      }
-    } catch {}
-  }
-
-  async waitForAdmission(
+  async setupRosterObserver(
     page: Page,
-    timeoutMs: number,
-    onStateChange: (state: MeetingState, message: string) => void
-  ): Promise<boolean> {
-    const startTime = Date.now();
-    while (Date.now() - startTime < timeoutMs) {
-      if (page.isClosed()) return false;
+    onEvent: (type: 'JOINED' | 'LEFT', p: ParticipantEventPayload) => void
+  ): Promise<void> {
+    try {
+      const bridgeFn = `__spectraGMeetRosterBridge_${Date.now()}`;
+      await page.exposeFunction(bridgeFn, (type: 'JOINED' | 'LEFT', name: string) => {
+        if (!name) return;
+        onEvent(type, {
+          participant_id: name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
+          name,
+          timestamp_ms: Date.now(),
+        });
+      });
 
-      const inMeeting = await page.locator('button[aria-label*="Leave" i], .footer__leave-btn').first().isVisible().catch(() => false);
-      if (inMeeting) {
-        onStateChange('IN_MEETING', 'Admitted to Zoom call');
-        return true;
-      }
-      await page.waitForTimeout(2000);
-    }
-    return false;
+      await page.evaluate((fnName) => {
+        const currentParticipants = new Set<string>();
+
+        function scanParticipants() {
+          const found = new Set<string>();
+          // Roster rows in People panel
+          document.querySelectorAll('[role="listitem"]').forEach((r) => {
+            const nameEl = r.querySelector('span[class*="name" i], div[class*="name" i], span');
+            const txt = (nameEl?.textContent || r.textContent || '')
+              .replace(/\(You\)/gi, '')
+              .replace(/\(Meeting host\)/gi, '')
+              .trim();
+            if (txt && txt.length >= 2 && !txt.toLowerCase().includes('people')) {
+              found.add(txt);
+            }
+          });
+
+          // Video tiles
+          document.querySelectorAll('div[data-participant-id], div[data-self-name]').forEach((t) => {
+            const selfName = t.getAttribute('data-self-name');
+            if (selfName && selfName.trim().length >= 2) {
+              found.add(selfName.trim());
+            }
+          });
+
+          for (const name of found) {
+            if (!currentParticipants.has(name)) {
+              currentParticipants.add(name);
+              (window as any)[fnName]('JOINED', name);
+            }
+          }
+
+          for (const name of currentParticipants) {
+            if (!found.has(name)) {
+              currentParticipants.delete(name);
+              (window as any)[fnName]('LEFT', name);
+            }
+          }
+        }
+
+        setInterval(scanParticipants, 2000);
+      }, bridgeFn);
+    } catch {}
   }
 
-  async leave(page: Page): Promise<void> {
+  async setupChatObserver(
+    page: Page,
+    onMessage: (msg: ChatMessagePayload) => void
+  ): Promise<void> {
     try {
-      const leaveBtn = page.locator('button[aria-label*="Leave" i], .footer__leave-btn').first();
-      if (await leaveBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await leaveBtn.click().catch(() => {});
-      }
+      const bridgeFn = `__spectraGMeetChatBridge_${Date.now()}`;
+      await page.exposeFunction(bridgeFn, (sender: string, text: string) => {
+        if (!text) return;
+        onMessage({
+          message_id: `gmeet_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          sender: sender || 'Participant',
+          text,
+          timestamp_ms: Date.now(),
+        });
+      });
+
+      await page.evaluate((fnName) => {
+        const seenMessages = new Set<string>();
+
+        function scanChat() {
+          // Look for chat message blocks in Google Meet
+          document.querySelectorAll('div[data-message-id], div[data-sender-name], div[jsname][class*="message" i]').forEach((el) => {
+            const sender = el.getAttribute('data-sender-name') || el.querySelector('[class*="sender" i], span')?.textContent || 'Participant';
+            const text = el.querySelector('[data-message-text], [class*="content" i], span:last-child')?.textContent || el.textContent || '';
+            const key = `${sender.trim()}:${text.trim()}`;
+            if (text.trim() && !seenMessages.has(key)) {
+              seenMessages.add(key);
+              (window as any)[fnName](sender.trim(), text.trim());
+            }
+          });
+        }
+
+        setInterval(scanChat, 1500);
+      }, bridgeFn);
     } catch {}
   }
 }
@@ -327,6 +362,9 @@ export function getAdapterForUrl(url: string): PlatformAdapter {
 
   const zoom = new ZoomAdapter();
   if (zoom.matches(url)) return zoom;
+
+  const teams = new TeamsAdapter();
+  if (teams.matches(url)) return teams;
 
   return new GenericMeetingAdapter();
 }

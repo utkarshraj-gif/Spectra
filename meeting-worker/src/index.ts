@@ -54,14 +54,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Health check
+  // Enhanced Health Check reporting active capacity, session slots, and memory usage (Task G-4)
   if (method === 'GET' && pathname === '/health') {
+    const mem = process.memoryUsage();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
         status: 'ok',
         service: 'meeting-worker',
         active_sessions: sessions.size,
+        max_capacity: config.maxConcurrentSessions,
+        available_slots: Math.max(0, config.maxConcurrentSessions - sessions.size),
+        memory: {
+          rss_mb: Math.round((mem.rss / (1024 * 1024)) * 10) / 10,
+          heap_used_mb: Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10,
+          heap_total_mb: Math.round((mem.heapTotal / (1024 * 1024)) * 10) / 10,
+        },
+        uptime_seconds: Math.round(process.uptime()),
       })
     );
     return;
@@ -82,6 +91,20 @@ const server = http.createServer(async (req, res) => {
   // Start Meeting Session (/sessions/start or /join for REST API client compatibility)
   if (method === 'POST' && (pathname === '/sessions/start' || pathname === '/join')) {
     try {
+      // 1. Enforce multi-session capacity limit (Task G-4)
+      if (sessions.size >= config.maxConcurrentSessions) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: 'Worker capacity reached',
+            active_sessions: sessions.size,
+            max_capacity: config.maxConcurrentSessions,
+            message: `Worker is currently running at maximum capacity (${config.maxConcurrentSessions} concurrent sessions). Please retry shortly.`,
+          })
+        );
+        return;
+      }
+
       const payload = await parseJsonBody<StartSessionPayload>(req);
       if (!payload.meeting_id || !payload.meeting_url) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -99,6 +122,7 @@ const server = http.createServer(async (req, res) => {
         payload.meeting_id,
         payload.meeting_url,
         payload.bot_name,
+        payload.passcode,
         (event) => broadcastEvent(payload.meeting_id, event)
       );
 
@@ -113,8 +137,10 @@ const server = http.createServer(async (req, res) => {
       res.end(
         JSON.stringify({
           status: 'dispatched',
-          message: 'Worker successfully dispatched to Google Meet',
+          message: 'Worker successfully dispatched to meeting',
           meeting_id: payload.meeting_id,
+          active_sessions: sessions.size,
+          max_capacity: config.maxConcurrentSessions,
         })
       );
     } catch (err) {
@@ -207,11 +233,20 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(config.port, () => {
-  console.log(`[MeetingWorker] Service listening on port ${config.port}`);
+  console.log(`[MeetingWorker] Service listening on port ${config.port} (Max capacity: ${config.maxConcurrentSessions})`);
   prewarmBrowserContext().catch((err) => {
     console.warn('[MeetingWorker] Browser pre-warm warning:', err);
   });
 });
+
+// Memory watchdog (checks every 30 seconds to prevent silent memory bloat)
+setInterval(() => {
+  const mem = process.memoryUsage();
+  const rssMb = Math.round(mem.rss / (1024 * 1024));
+  if (rssMb > 1800) {
+    console.warn(`[MeetingWorker][MemoryWatchdog] Elevated RSS memory: ${rssMb} MB across ${sessions.size} sessions.`);
+  }
+}, 30000).unref();
 
 // Graceful process shutdown
 async function gracefulShutdown(signal: string) {

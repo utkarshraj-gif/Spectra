@@ -7,14 +7,14 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { config } from './config.js';
 
-// Configure stealth evasions for Google Meet bot automation
+// Configure stealth evasions for meeting bot automation
 const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('iframe.contentWindow');
 stealth.enabledEvasions.delete('media.codecs');
 stealth.enabledEvasions.delete('user-agent-override');
 chromium.use(stealth);
 
-// Canonical browser args for Google Meet stealth join
+// Canonical browser args for stealth meeting joins (Google Meet, Zoom, Teams)
 export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -35,13 +35,18 @@ export interface CreateMeetingContextOptions {
   headless?: boolean;
 }
 
-let sharedContext: BrowserContext | null = null;
-let sharedProfileDir: string | null = null;
-
 export async function prewarmBrowserContext(options?: CreateMeetingContextOptions): Promise<void> {
   try {
-    await createMeetingContext('prewarm', options);
-    console.log('[Browser] Chrome context pre-warmed and ready for instant join');
+    const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
+    const testDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile', 'prewarm');
+    fs.mkdirSync(testDir, { recursive: true });
+    const ctx = await chromium.launchPersistentContext(testDir, {
+      headless: isHeadless,
+      args: [...SPECTRA_JOIN_BROWSER_ARGS],
+    });
+    await ctx.close().catch(() => {});
+    fs.rmSync(testDir, { recursive: true, force: true });
+    console.log('[Browser] Chrome binary verified and pre-warmed for instant join');
   } catch (err) {
     console.warn('[Browser] Chrome pre-warming warning:', err);
   }
@@ -51,18 +56,11 @@ export async function createMeetingContext(
   meetingId: string,
   options?: CreateMeetingContextOptions
 ): Promise<{ context: BrowserContext; profileDir: string }> {
-  // If warm persistent context is already active and healthy, reuse instantly (0ms launch delay)
-  if (sharedContext) {
-    try {
-      sharedContext.pages();
-      return { context: sharedContext, profileDir: sharedProfileDir! };
-    } catch {
-      sharedContext = null;
-    }
-  }
+  // Dedicated session profile directory for complete process and session isolation
+  const baseProfileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
+  const safeMeetingId = meetingId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const profileDir = path.join(baseProfileDir, `session-${safeMeetingId}`);
 
-  // Durable persistent profile directory for browser session state
-  const profileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
   if (!fs.existsSync(profileDir)) {
     fs.mkdirSync(profileDir, { recursive: true });
   }
@@ -91,7 +89,7 @@ export async function createMeetingContext(
     context = await chromium.launchPersistentContext(profileDir, baseOptions);
   }
 
-  // Ensure bot never exposes synthetic green test video to Google Meet
+  // Ensure bot never exposes synthetic green test video to meetings
   await context.addInitScript(() => {
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
@@ -121,12 +119,15 @@ export async function createMeetingContext(
     } catch {}
   });
 
-  sharedContext = context;
-  sharedProfileDir = profileDir;
-
   return { context, profileDir };
 }
 
 export function cleanupProfileDir(profileDir: string): void {
-  // Preserved for durable Google session cookies
+  try {
+    if (profileDir && profileDir.includes('session-') && fs.existsSync(profileDir)) {
+      fs.rmSync(profileDir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.warn(`[Browser] Warning cleaning up profile dir ${profileDir}:`, err);
+  }
 }
