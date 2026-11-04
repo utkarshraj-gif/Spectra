@@ -88,6 +88,55 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Diagnostic screenshot for active session
+  if (method === 'GET' && pathname.startsWith('/sessions/') && pathname.endsWith('/screenshot')) {
+    const parts = pathname.split('/');
+    const meetingId = parts[2];
+    const session = sessions.get(meetingId);
+    const page = session?.getPage();
+    if (!page || page.isClosed()) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Session page not available' }));
+      return;
+    }
+    try {
+      const buffer = await page.screenshot({ type: 'png' });
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(buffer);
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // Diagnostic info for active session
+  if (method === 'GET' && pathname.startsWith('/sessions/') && pathname.endsWith('/info')) {
+    const parts = pathname.split('/');
+    const meetingId = parts[2];
+    const session = sessions.get(meetingId);
+    const page = session?.getPage();
+    if (!page || page.isClosed()) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Session page not available' }));
+      return;
+    }
+    try {
+      const info = await page.evaluate(() => ({
+        url: window.location.href,
+        title: document.title,
+        bodyText: document.body ? document.body.innerText.replace(/\s+/g, ' ').slice(0, 300) : '',
+        buttons: Array.from(document.querySelectorAll('button')).map(b => b.innerText || b.getAttribute('aria-label') || b.getAttribute('data-tid')),
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(info));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   // Start Meeting Session (/sessions/start or /join for REST API client compatibility)
   if (method === 'POST' && (pathname === '/sessions/start' || pathname === '/join')) {
     try {

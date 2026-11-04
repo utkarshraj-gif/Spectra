@@ -18,11 +18,10 @@ chromium.use(stealth);
 export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
-  '--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor',
-  '--disable-site-isolation-trials',
   '--disable-infobars',
   '--disable-notifications',
   '--use-fake-ui-for-media-stream',
+  '--use-fake-device-for-media-stream',
   '--autoplay-policy=no-user-gesture-required',
   '--disable-blink-features=AutomationControlled',
   '--disable-dev-shm-usage',
@@ -35,18 +34,24 @@ export interface CreateMeetingContextOptions {
   headless?: boolean;
 }
 
+let sharedBrowser: any = null;
+
 export async function prewarmBrowserContext(options?: CreateMeetingContextOptions): Promise<void> {
+  const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
   try {
-    const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
-    const testDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile', 'prewarm');
-    fs.mkdirSync(testDir, { recursive: true });
-    const ctx = await chromium.launchPersistentContext(testDir, {
-      headless: isHeadless,
-      args: [...SPECTRA_JOIN_BROWSER_ARGS],
-    });
-    await ctx.close().catch(() => {});
-    fs.rmSync(testDir, { recursive: true, force: true });
-    console.log('[Browser] Chrome binary verified and pre-warmed for instant join');
+    if (!sharedBrowser || !sharedBrowser.isConnected()) {
+      const baseOptions = {
+        headless: isHeadless,
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: [...SPECTRA_JOIN_BROWSER_ARGS],
+      };
+      try {
+        sharedBrowser = await chromium.launch({ ...baseOptions, channel: 'chrome' });
+      } catch {
+        sharedBrowser = await chromium.launch(baseOptions);
+      }
+    }
+    console.log('[Browser] Chrome automation environment pre-warmed and ready');
   } catch (err) {
     console.warn('[Browser] Chrome pre-warming warning:', err);
   }
@@ -56,42 +61,34 @@ export async function createMeetingContext(
   meetingId: string,
   options?: CreateMeetingContextOptions
 ): Promise<{ context: BrowserContext; profileDir: string }> {
-  // Dedicated session profile directory for complete process and session isolation
-  const baseProfileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
-  const safeMeetingId = meetingId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const profileDir = path.join(baseProfileDir, `session-${safeMeetingId}`);
-
-  if (!fs.existsSync(profileDir)) {
-    fs.mkdirSync(profileDir, { recursive: true });
-  }
-
   const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
 
-  const baseOptions = {
-    headless: isHeadless,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [...SPECTRA_JOIN_BROWSER_ARGS],
-    permissions: ['microphone'] as string[],
+  if (!sharedBrowser || !sharedBrowser.isConnected()) {
+    const baseOptions = {
+      headless: isHeadless,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [...SPECTRA_JOIN_BROWSER_ARGS],
+    };
+    try {
+      sharedBrowser = await chromium.launch({ ...baseOptions, channel: 'chrome' });
+    } catch {
+      sharedBrowser = await chromium.launch(baseOptions);
+    }
+  }
+
+  // Create isolated, in-memory browser context per meeting session to eliminate cross-meeting state bleed
+  const context: BrowserContext = await sharedBrowser.newContext({
+    permissions: ['microphone', 'camera'],
     viewport: { width: 1280, height: 720 },
     locale: 'en-US',
-  };
-
-  let context: BrowserContext;
-
-  try {
-    // Attempt with system Google Chrome channel first
-    context = await chromium.launchPersistentContext(profileDir, {
-      ...baseOptions,
-      channel: 'chrome',
-    });
-  } catch {
-    // Fallback to bundled Chromium (e.g. inside Docker container)
-    context = await chromium.launchPersistentContext(profileDir, baseOptions);
-  }
+  });
 
   // Ensure bot never exposes synthetic green test video to meetings
   await context.addInitScript(() => {
     try {
+      // Do not mutate media stream contracts for Microsoft Teams calling agents
+      if (window.location.hostname.includes('teams')) return;
+
       if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         const origEnumerate = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
         navigator.mediaDevices.enumerateDevices = async () => {
@@ -113,21 +110,26 @@ export async function createMeetingContext(
             err.name = 'NotFoundError';
             throw err;
           }
-          return origGUM(constraints);
+          const stream = await origGUM(constraints);
+          // Disable outgoing microphone tracks so bot never transmits audio
+          if (stream && stream.getAudioTracks) {
+            stream.getAudioTracks().forEach((t) => {
+              t.enabled = false;
+            });
+          }
+          return stream;
         };
       }
     } catch {}
   });
 
-  return { context, profileDir };
+  return { context, profileDir: '' };
 }
 
 export function cleanupProfileDir(profileDir: string): void {
   try {
-    if (profileDir && profileDir.includes('session-') && fs.existsSync(profileDir)) {
+    if (profileDir && fs.existsSync(profileDir)) {
       fs.rmSync(profileDir, { recursive: true, force: true });
     }
-  } catch (err) {
-    console.warn(`[Browser] Warning cleaning up profile dir ${profileDir}:`, err);
-  }
+  } catch {}
 }

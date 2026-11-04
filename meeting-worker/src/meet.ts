@@ -3,7 +3,7 @@ import { createMeetingContext, cleanupProfileDir } from './browser.js';
 import { config } from './config.js';
 import { MeetingState, SessionStatusEvent, PlatformAdapter } from './types.js';
 import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile, LiveAudioStreamer } from './audio/index.js';
-import { getAdapterForUrl } from './platforms/index.js';
+import { getAdapterForUrl, ensureMicrophoneMuted } from './platforms/index.js';
 
 export class MeetingSession {
   public readonly meetingId: string;
@@ -49,6 +49,10 @@ export class MeetingSession {
     return this.state;
   }
 
+  public getPage(): Page | null {
+    return this.page;
+  }
+
   private transitionTo(newState: MeetingState, message?: string, details?: Record<string, unknown>) {
     if (this.isDestroyed && newState !== 'CALL_ENDED' && newState !== 'FAILED') {
       return;
@@ -67,7 +71,7 @@ export class MeetingSession {
 
   public async start(): Promise<void> {
     try {
-      // 1. Arm hard session duration watchdog (e.g. 3-hour limit per session)
+      // 1. Arm hard session duration watchdog (3-hour limit per session)
       this.maxDurationTimer = setTimeout(async () => {
         if (!this.isDestroyed) {
           console.warn(`[MeetingSession] Max session duration (${config.maxSessionDurationMs / 3600000}h) reached for ${this.meetingId}. Auto-leaving.`);
@@ -114,53 +118,47 @@ export class MeetingSession {
 
       if (admitted) {
         this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
-        this.startInMeetingMonitor();
 
-        // Open People panel in Google Meet if needed to ensure participant list in DOM
-        try {
-          const isPeoplePanelOpen = await this.page.evaluate(() => {
-            return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
-          });
-          if (!isPeoplePanelOpen) {
-            const peopleButton = this.page
-              .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
-              .first();
-            if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
-              await peopleButton.click().catch(() => {});
-            }
-          }
-        } catch {}
-
-        // Setup Audio Stream & Recorders
+        // 1. Immediately start audio capture for 0ms initial recording latency
         await this.startAudioCapture();
+
+        // 2. Enforce muted microphone immediately upon entering meeting room
+        await ensureMicrophoneMuted(this.page).catch(() => {});
+
+        // 3. Start in-meeting monitor and speaker observer
+        this.startInMeetingMonitor();
         await this.setupSpeakerObserver();
 
-        // Setup In-Meeting Participant Roster Observer (Task G-2)
+        // 4. Open People panel in background (non-blocking)
+        this.openPeoplePanel().catch(() => {});
+
+        // 5. Setup In-Meeting Participant Roster Observer (Task G-2)
         if (this.adapter.setupRosterObserver) {
           await this.adapter.setupRosterObserver(this.page, (type, p) => {
             this.onEventCallback({
               event: type === 'JOINED' ? 'PARTICIPANT_JOINED' : 'PARTICIPANT_LEFT',
               meeting_id: this.meetingId,
               state: this.state,
-              timestamp: Date.now(),
+              timestamp: p.timestamp_ms || Date.now(),
               message: `${p.name} ${type === 'JOINED' ? 'joined' : 'left'} the meeting`,
               details: {
                 participant_id: p.participant_id,
                 name: p.name,
+                action: type,
                 timestamp_ms: p.timestamp_ms,
               },
             });
           });
         }
 
-        // Setup In-Meeting Chat Scraper (Task G-2)
+        // 6. Setup In-Meeting Chat Scraper Observer (Task G-2)
         if (this.adapter.setupChatObserver) {
           await this.adapter.setupChatObserver(this.page, (msg) => {
             this.onEventCallback({
               event: 'CHAT_MESSAGE',
               meeting_id: this.meetingId,
               state: this.state,
-              timestamp: Date.now(),
+              timestamp: msg.timestamp_ms || Date.now(),
               message: `${msg.sender}: ${msg.text}`,
               details: {
                 message_id: msg.message_id,
@@ -225,22 +223,36 @@ export class MeetingSession {
           }
         }
 
-        // 2. Check participant count
+        // 2. Ensure bot's own microphone remains muted
+        const inMeetingMicBtn = this.page
+          .locator(
+            'button[aria-label*="Turn off microphone" i], div[role="button"][aria-label*="Turn off microphone" i], [data-is-muted="false"][aria-label*="mic" i]'
+          )
+          .first();
+        if (await inMeetingMicBtn.isVisible({ timeout: 50 }).catch(() => false)) {
+          console.log('[MeetingSession] Bot microphone detected active in-meeting; auto-muting now.');
+          await inMeetingMicBtn.click().catch(() => {});
+        }
+
+        // 3. Check participant count
         const participantCount = await this.page.evaluate((botName) => {
           const botLower = (botName || '').trim().toLowerCase();
 
-          // Check People tab counter badge (Google Meet)
-          const counterEl = document.querySelector(
-            '[aria-label*="people" i], [aria-label*="everyone" i], [data-tab-id="1"]'
+          // 1. Check People tab counter badge or header chips (Google Meet, Teams)
+          const badges = Array.from(
+            document.querySelectorAll(
+              'button[aria-label*="people" i], button[aria-label*="everyone" i], button[aria-label*="participant" i], div[aria-label*="people" i], [data-tab-id="1"]'
+            )
           );
-          if (counterEl) {
-            const countMatch = (counterEl.textContent || counterEl.getAttribute('aria-label') || '').match(/\b([0-9]+)\b/);
-            if (countMatch) {
-              return parseInt(countMatch[1], 10);
+          for (const el of badges) {
+            const label = (el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '');
+            const m = label.match(/\b([2-9]|\d{2,})\b/);
+            if (m) {
+              return parseInt(m[1], 10);
             }
           }
 
-          // Check Zoom participant count header
+          // 2. Check Zoom participant count header
           const zoomCountEl = document.querySelector('.footer-button__number-counter, .participants-header__title');
           if (zoomCountEl) {
             const countMatch = (zoomCountEl.textContent || '').match(/\b([0-9]+)\b/);
@@ -249,7 +261,7 @@ export class MeetingSession {
             }
           }
 
-          // Check participant rows in People panel
+          // 3. Check participant rows in People panel
           const rows = document.querySelectorAll('[role="listitem"], .participants-item__display-name, [data-tid="roster-participant"]');
           if (rows.length > 0) {
             let count = 0;
@@ -257,15 +269,30 @@ export class MeetingSession {
               const txt = (r.textContent || '').toLowerCase();
               if (txt && !txt.includes(botLower)) count++;
             });
-            return count > 0 ? count + 1 : 1;
+            if (count > 0) return count + 1;
           }
 
-          // Check video tiles
-          const tiles = document.querySelectorAll('div[data-participant-id], div[data-requested-participant-id], [data-testid="participant-tile"]');
+          // 4. Check visible participant badges across grid tiles
+          const nameEls = document.querySelectorAll('[data-self-name], [jsname="Wb950c"], div[class*="name" i]');
+          const found = new Set();
+          nameEls.forEach((el) => {
+            const raw = (el.getAttribute('data-self-name') || el.textContent || '').trim().toLowerCase();
+            if (raw && !raw.includes(botLower) && raw.length >= 2 && raw.length <= 40) {
+              found.add(raw);
+            }
+          });
+          if (found.size > 0) {
+            return found.size + 1;
+          }
+
+          // 5. Video tiles
+          const tiles = document.querySelectorAll(
+            'div[data-participant-id], div[data-requested-participant-id], div[data-tile-id], div[data-allocation-index], [data-testid="participant-tile"]'
+          );
           return tiles.length;
         }, this.botName).catch(() => -1);
 
-        // 3. Intelligent "Lone Bot" Auto-Departure (Task G-3)
+        // 4. Intelligent "Lone Bot" Auto-Departure (Task G-3)
         // If human participants were confirmed, and bot is left alone for > 90 seconds
         if (participantCount > 1) {
           hadHumanParticipants = true;
@@ -287,11 +314,17 @@ export class MeetingSession {
           meeting_id: this.meetingId,
           state: this.state,
           timestamp: Date.now(),
+          details: {
+            duration_ms: Date.now() - joinedAt,
+            participant_count: participantCount,
+            active_speaker: this.currentSpeaker || undefined,
+            lone_bot_seconds: loneBotStartTime ? Math.round((Date.now() - loneBotStartTime) / 1000) : 0,
+          },
         });
-      } catch {
-        // Non-critical poll catch
+      } catch (err) {
+        console.warn(`[MeetingSession] Monitor loop error:`, err);
       }
-    }, 1500);
+    }, 2000);
   }
 
   private stopMonitoring(): void {
@@ -301,10 +334,28 @@ export class MeetingSession {
     }
   }
 
+  private async openPeoplePanel(): Promise<void> {
+    if (!this.page) return;
+    try {
+      const isPeoplePanelOpen = await this.page.evaluate(() => {
+        return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
+      });
+      if (!isPeoplePanelOpen) {
+        const peopleButton = this.page
+          .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
+          .first();
+        if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await peopleButton.click().catch(() => {});
+        }
+      }
+    } catch {}
+  }
+
   private async startAudioCapture(): Promise<void> {
     if (!this.page || this.audioCaptureSession) return;
     try {
-      const wsUrl = `${config.aiServiceWsUrl}/ws/transcribe/${this.meetingId}`;
+      const wsUrl = `${config.aiServiceWsUrl}?meeting_id=${this.meetingId}`;
+
       this.streamer = new LiveAudioStreamer({
         aiServiceWsUrl: wsUrl,
         meetingId: this.meetingId,
@@ -337,9 +388,10 @@ export class MeetingSession {
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
         outputDirectory: config.recordingsPath,
-        onPcmChunk: (chunk) => {
+        silenceThreshold: 0.0004,
+        onPcmChunk: ({ pcmBuffer }) => {
           if (this.streamer) {
-            this.streamer.sendPcmChunk(chunk.pcmBuffer);
+            this.streamer.sendPcmChunk(pcmBuffer);
           }
         },
       });
@@ -427,11 +479,15 @@ export class MeetingSession {
             const foundNames = new Set<string>();
             let activeSpeaker: string | null = null;
 
+            // 1. Video grid tiles & badges across platforms (Google Meet, Microsoft Teams, Zoom)
             const tileSelectors = [
               'div[data-participant-id]',
               'div[data-requested-participant-id]',
               'div[data-tile-id]',
               'div[data-allocation-index]',
+              'div[data-tid="calling-participant-stream"]',
+              'div[data-tid="calling-participant-tile"]',
+              'div[data-tid="participant-item"]',
               'div[role="region"]',
               '.participants-item__display-name',
               '[data-tid="roster-participant"]',
@@ -558,23 +614,17 @@ export class MeetingSession {
       if (this.page && !this.page.isClosed()) {
         await this.page.close().catch(() => {});
       }
-    } catch {}
-
-    // 3. Explicitly close context to kill Chromium child processes (eliminates orphaned Chrome processes)
-    try {
       if (this.context) {
         await this.context.close().catch(() => {});
       }
-    } catch {}
-
-    // 4. Remove session profile directory if isolated
-    if (this.profileDir) {
-      cleanupProfileDir(this.profileDir);
+      if (this.profileDir) {
+        cleanupProfileDir(this.profileDir);
+      }
+    } finally {
+      this.page = null;
+      this.context = null;
+      this.profileDir = null;
     }
-
-    this.page = null;
-    this.context = null;
-    this.profileDir = null;
   }
 }
 

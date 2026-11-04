@@ -1,11 +1,22 @@
 import type { Page } from 'playwright';
 import type { MeetingPlatform, PlatformAdapter, MeetingState, ParticipantEventPayload, ChatMessagePayload } from '../types.js';
 
+/**
+ * TeamsAdapter — Enterprise adapter for Microsoft Teams Web client.
+ * Handles direct Light Meetings normalization, app-launcher bypass, guest name configuration,
+ * audio/video modal dismissal, pre-join mute controls, lobby detection, admission monitoring,
+ * in-call tear down, and participant/chat observation.
+ */
 export class TeamsAdapter implements PlatformAdapter {
   readonly platform: MeetingPlatform = 'teams';
 
   matches(url: string): boolean {
-    return url.includes('teams.microsoft.com') || url.includes('teams.live.com');
+    const lower = url.toLowerCase();
+    return (
+      lower.includes('teams.microsoft.com') ||
+      lower.includes('teams.live.com') ||
+      lower.includes('teams.cloud.microsoft')
+    );
   }
 
   normalizeUrl(rawUrl: string): string {
@@ -13,89 +24,104 @@ export class TeamsAdapter implements PlatformAdapter {
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       url = 'https://' + url;
     }
+
+    try {
+      const u = new URL(url);
+      const host = u.hostname.toLowerCase();
+
+      // Normalize teams.live.com meet links directly to the canonical Light Meetings entry point
+      if (host.includes('teams.live.com') && u.pathname.includes('/meet/')) {
+        const codeMatch = u.pathname.match(/\/meet\/([^\/?#]+)/i);
+        const code = codeMatch ? codeMatch[1] : '';
+        const passcode = u.searchParams.get('p') || '';
+        const coords = Buffer.from(
+          JSON.stringify({
+            meetingUrl: url,
+            meetingCode: code,
+            passcode: passcode,
+          })
+        ).toString('base64');
+
+        return `https://teams.live.com/light-meetings/launch?p=${encodeURIComponent(
+          passcode
+        )}&anon=true&agent=web&coords=${encodeURIComponent(coords)}`;
+      }
+    } catch {}
+
     return url;
   }
 
   async configurePreJoin(page: Page, botName: string): Promise<void> {
-    // 1. Bypass "Open Microsoft Teams" app prompt by choosing "Continue on this browser"
-    try {
-      const continueWebSelectors = [
-        'button[data-tid="joinOnWeb"]',
-        'button:has-text("Continue on this browser")',
-        'a:has-text("Continue on this browser")',
-        'button:has-text("Join on the web instead")',
-      ];
-      for (const sel of continueWebSelectors) {
-        const btn = page.locator(sel).first();
-        if (await btn.isVisible({ timeout: 4000 }).catch(() => false)) {
-          await btn.click({ timeout: 2000 }).catch(() => {});
-          await page.waitForLoadState('domcontentloaded').catch(() => {});
-          break;
-        }
-      }
-    } catch {}
+    // 1. Bypass Microsoft Teams app-launcher interstitial if encountered
+    await this.bypassInterstitial(page);
 
-    // 2. Dismiss cookie / privacy prompts
+    // 2. Dismiss cookie banner / notifications if present
     try {
-      const cookieBtn = page.locator('#banner-accept, button:has-text("Accept"), button:has-text("Got it")').first();
+      const cookieBtn = page
+        .locator('button#onetrust-accept-btn-handler, button:has-text("Accept"), button:has-text("Got it")')
+        .first();
       if (await cookieBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await cookieBtn.click({ timeout: 1000 }).catch(() => {});
+        await cookieBtn.click().catch(() => {});
+        await page.waitForTimeout(300);
       }
     } catch {}
 
-    // 3. Fill display name
-    try {
-      const nameSelectors = [
-        'input[data-tid="prejoin-display-name-input"]',
-        'input#username',
-        'input[placeholder*="Type your name" i]',
-        'input[aria-label*="name" i]',
-      ];
-      for (const sel of nameSelectors) {
-        const input = page.locator(sel).first();
-        if (await input.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await input.fill(botName);
-          break;
-        }
-      }
-    } catch {}
+    // 3. Wait for pre-join interface to mount (up to 35s for CDN bundles)
+    await this.waitForPreJoinReady(page);
 
-    // 4. Mute camera & microphone prior to admission
-    try {
-      const micBtn = page.locator('button[data-tid="toggle-mute"], button[aria-label*="mute microphone" i]').first();
-      if (await micBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-        const ariaChecked = await micBtn.getAttribute('aria-checked').catch(() => '');
-        // In Teams prejoin, aria-checked="true" means mic is ON
-        if (ariaChecked === 'true') {
-          await micBtn.click().catch(() => {});
-        }
-      }
+    // 4. Dismiss "Continue without audio or video" permission modal if present
+    await this.dismissMediaWarningModal(page);
 
-      const camBtn = page.locator('button[data-tid="toggle-video"], button[aria-label*="turn camera off" i]').first();
-      if (await camBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-        const ariaChecked = await camBtn.getAttribute('aria-checked').catch(() => '');
-        if (ariaChecked === 'true') {
-          await camBtn.click().catch(() => {});
-        }
-      }
-    } catch {}
+    // 5. Fill Guest display name input
+    await this.fillGuestName(page, botName);
+
+    // 6. Ensure camera is toggled OFF
+    await this.ensureCameraOff(page);
+
+    // 7. Ensure microphone is toggled OFF (MUTED)
+    await this.ensureMicrophoneOff(page);
   }
 
   async submitJoinRequest(page: Page): Promise<void> {
-    try {
-      const joinSelectors = [
-        'button[data-tid="prejoin-join-button"]',
-        'button:has-text("Join now")',
-        'button:has-text("Join")',
-      ];
-      for (const sel of joinSelectors) {
-        const btn = page.locator(sel).first();
-        if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await btn.click({ timeout: 2000 }).catch(() => {});
-          break;
+    // 1. Dismiss any lingering modal
+    await this.dismissMediaWarningModal(page);
+
+    // 2. Re-verify camera and microphone are OFF before clicking Join
+    await this.ensureCameraOff(page);
+    await this.ensureMicrophoneOff(page);
+
+    // 3. Click Join button ("Join now" / "Join meeting")
+    const joinSelectors = [
+      'button:has-text("Join now")',
+      'button[data-tid="prejoin-join-button"]',
+      'button#prejoin-join-button',
+      'button[aria-label*="Join now" i]',
+      'button:has-text("Join meeting")',
+    ];
+
+    for (const sel of joinSelectors) {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const disabled = await btn.evaluate((el: HTMLElement) => {
+          return (el as HTMLButtonElement).disabled || el.getAttribute('aria-disabled') === 'true';
+        }).catch(() => false);
+
+        if (!disabled) {
+          console.log(`[TeamsAdapter] Submitting join request via ${sel}`);
+          await btn.click({ force: true, timeout: 3000 }).catch(() => {});
+
+          // Fallback DOM dispatch and Enter press
+          await page.evaluate(() => {
+            const el = Array.from(document.querySelectorAll('button')).find(
+              b => b.innerText.includes('Join now') || b.getAttribute('data-tid') === 'prejoin-join-button'
+            );
+            el?.click();
+          }).catch(() => {});
+          await page.keyboard.press('Enter').catch(() => {});
+          return;
         }
       }
-    } catch {}
+    }
   }
 
   async waitForAdmission(
@@ -105,34 +131,56 @@ export class TeamsAdapter implements PlatformAdapter {
   ): Promise<boolean> {
     const startTime = Date.now();
 
+    const IN_CALL_SELECTORS = [
+      'button[data-tid="hangup-button"]',
+      'button#hangup-button',
+      'button[data-tid="call-control-hangup"]',
+      'button[aria-label*="Leave" i]',
+      'button[aria-label*="Hang up" i]',
+      'button[data-tid="roster-button"]',
+      '[data-tid="call-roster-mount"]',
+      'div[data-tid="calling-participant-stream"]',
+      'div[data-tid="calling-participant-tile"]',
+    ];
+
+    let hasAnnouncedLobby = false;
+
     while (Date.now() - startTime < timeoutMs) {
       if (page.isClosed()) return false;
 
-      // 1. Check for Teams lobby / waiting room
-      const lobbySelectors = [
-        'div[data-tid="lobby-screen"]',
-        'div:has-text("Someone in the meeting should let you in soon")',
-        'div:has-text("When the meeting starts, we\'ll let people know you\'re waiting")',
-        'div:has-text("Waiting for host to admit you")',
-      ];
-      for (const sel of lobbySelectors) {
-        if (await page.locator(sel).first().isVisible({ timeout: 200 }).catch(() => false)) {
-          onStateChange('WAITING_FOR_ADMISSION', 'Waiting in Teams lobby for admission');
-          break;
+      // 1. Check if admitted into meeting
+      for (const sel of IN_CALL_SELECTORS) {
+        if (await page.locator(sel).first().isVisible({ timeout: 100 }).catch(() => false)) {
+          console.log(`[TeamsAdapter] Admitted into Microsoft Teams call (detected via ${sel})`);
+          onStateChange('IN_MEETING', 'Admitted to Microsoft Teams meeting');
+          return true;
         }
       }
 
-      // 2. Check for in-meeting controls
-      const inMeetingSelectors = [
-        'button[data-tid="hangup-button"]',
-        '[data-tid="call-controls"]',
-        'button[aria-label*="Leave" i]',
-        '#callingComposableContainer',
-      ];
-      for (const sel of inMeetingSelectors) {
-        if (await page.locator(sel).first().isVisible({ timeout: 200 }).catch(() => false)) {
-          onStateChange('IN_MEETING', 'Admitted to Teams meeting');
-          return true;
+      // 2. Inspect document body text for lobby or rejection state
+      const bodyText = await page
+        .evaluate(() => (document.body ? document.body.innerText : ''))
+        .catch(() => '');
+
+      // Check if rejected, disconnected, or call ended
+      if (
+        /Sorry, we couldn't connect you|removed from the meeting|Meeting ended|request to join was declined|Couldn't join the call|Returning to Teams meetings|Enjoy your call/i.test(
+          bodyText
+        )
+      ) {
+        console.log(`[TeamsAdapter] Microsoft Teams admission declined, disconnected or ended`);
+        onStateChange('ADMISSION_DENIED', 'Teams meeting is inactive, ended, or join denied');
+        return false;
+      }
+
+      // 3. Check if waiting in lobby
+      const inLobby = /let you in|waiting in the lobby|someone in the meeting|someone will let you in/i.test(bodyText);
+
+      if (inLobby) {
+        if (!hasAnnouncedLobby) {
+          hasAnnouncedLobby = true;
+          console.log(`[TeamsAdapter] Waiting in Microsoft Teams lobby for admission`);
+          onStateChange('WAITING_FOR_ADMISSION', 'Waiting in Microsoft Teams lobby for host admission');
         }
       }
 
@@ -146,13 +194,15 @@ export class TeamsAdapter implements PlatformAdapter {
     try {
       const leaveSelectors = [
         'button[data-tid="hangup-button"]',
+        'button#hangup-button',
+        'button[data-tid="call-control-hangup"]',
         'button[aria-label*="Leave" i]',
-        'button:has-text("Leave")',
+        'button[aria-label*="Hang up" i]',
       ];
       for (const sel of leaveSelectors) {
         const btn = page.locator(sel).first();
-        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
-          await btn.click({ timeout: 1500 }).catch(() => {});
+        if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await btn.click().catch(() => {});
           break;
         }
       }
@@ -244,5 +294,234 @@ export class TeamsAdapter implements PlatformAdapter {
       }, bridgeFn);
     } catch {}
   }
-}
 
+  private async bypassInterstitial(page: Page): Promise<void> {
+    // Check if on launcher page
+    if (!page.url().includes('launcher.html')) {
+      const isLauncher = await page
+        .locator('button[data-tid="joinOnWeb"], button:has-text("Continue on this browser")')
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+      if (!isLauncher) return;
+    }
+
+    console.log('[TeamsAdapter] Resolving Teams Web application URL from launcher...');
+
+    // Attempt direct extraction of the web client URL via the launcher React fiber
+    const targetWebUrl = await page
+      .evaluate(() => {
+        const btn = document.querySelector('[data-tid="joinOnWeb"]') as any;
+        if (!btn) return null;
+        const key = Object.keys(btn).find(
+          k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+        );
+        let current = btn[key as string];
+        while (current) {
+          if (current.stateNode?.launcherService?.getOpenInTeamsWebUrl) {
+            return current.stateNode.launcherService.getOpenInTeamsWebUrl();
+          }
+          current = current.return;
+        }
+        return null;
+      })
+      .catch(() => null);
+
+    if (targetWebUrl) {
+      console.log(`[TeamsAdapter] Navigating directly to web client: ${targetWebUrl.slice(0, 80)}...`);
+      await page.goto(targetWebUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      return;
+    }
+
+    // Fallback: Click the "Continue on this browser" button directly
+    const webButtonSelectors = [
+      'button[data-tid="joinOnWeb"]',
+      'button:has-text("Continue on this browser")',
+      '#openTeamsClientInBrowser',
+      'button:has-text("Join on the web instead")',
+    ];
+
+    for (const sel of webButtonSelectors) {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+        console.log(`[TeamsAdapter] Bypassing app launcher via: ${sel}`);
+        await btn.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(1000);
+        return;
+      }
+    }
+  }
+
+  private async waitForPreJoinReady(page: Page): Promise<void> {
+    for (let s = 1; s <= 35; s++) {
+      if (page.isClosed()) return;
+
+      // Check if Teams showed post-call "Did you leave by mistake? Rejoin the call"
+      const rejoinBtn = page
+        .locator('button:has-text("Rejoin the call"), button:has-text("Rejoin"), button[data-tid="rejoin-button"]')
+        .first();
+      if (await rejoinBtn.isVisible({ timeout: 100 }).catch(() => false)) {
+        console.log('[TeamsAdapter] Post-call splash detected; clicking "Rejoin the call"...');
+        await rejoinBtn.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(1000);
+      }
+
+      const hasModal = await page
+        .locator('button:has-text("Continue without audio or video")')
+        .first()
+        .isVisible({ timeout: 100 })
+        .catch(() => false);
+
+      const hasNameInput = await page
+        .locator('input[placeholder*="name" i], input[data-tid="prejoin-display-name-input"]')
+        .first()
+        .isVisible({ timeout: 100 })
+        .catch(() => false);
+
+      if (hasModal || hasNameInput) {
+        console.log(`[TeamsAdapter] Pre-join screen ready (took ~${s}s)`);
+        return;
+      }
+
+      await page.waitForTimeout(1000);
+    }
+  }
+
+  private async dismissMediaWarningModal(page: Page): Promise<void> {
+    try {
+      const continueBtn = page.locator('button:has-text("Continue without audio or video")').first();
+      if (await continueBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        console.log('[TeamsAdapter] Dismissing media permission modal: "Continue without audio or video"');
+        await continueBtn.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(300);
+      }
+
+      // Remove any leftover modal backdrop to unblock pointer events
+      await page
+        .evaluate(() => {
+          document
+            .querySelectorAll('.fui-DialogSurface__backdrop, .fui-DialogSurface, [role="dialog"]')
+            .forEach(el => el.remove());
+        })
+        .catch(() => {});
+    } catch {}
+  }
+
+  private async fillGuestName(page: Page, botName: string): Promise<void> {
+    const nameSelectors = [
+      'input[placeholder*="name" i]',
+      'input[data-tid="prejoin-display-name-input"]',
+      'input[aria-label*="Type your name" i]',
+      'input[aria-label*="name" i]',
+      'input[type="text"]:not([aria-hidden="true"])',
+      'input',
+    ];
+
+    for (const sel of nameSelectors) {
+      const input = page.locator(sel).first();
+      if (await input.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const currentVal = await input.inputValue().catch(() => '');
+        if (!currentVal || currentVal.trim() !== botName) {
+          console.log(`[TeamsAdapter] Entering bot name '${botName}' via ${sel}`);
+          await input.click({ force: true }).catch(() => {});
+          await input.fill(botName);
+          await page.waitForTimeout(200);
+        }
+        return;
+      }
+    }
+  }
+
+  private async ensureCameraOff(page: Page): Promise<void> {
+    try {
+      // Check camera switches / checkboxes
+      await page
+        .evaluate(() => {
+          const switches = Array.from(document.querySelectorAll('input[type="checkbox"], button[role="switch"]'));
+          for (const sw of switches) {
+            const label = (sw.getAttribute('aria-label') || '').toLowerCase();
+            const parent = (sw.closest('div')?.innerText || '').toLowerCase();
+            if (label.includes('video') || label.includes('camera') || parent.includes('camera')) {
+              const checked = (sw as HTMLInputElement).checked || sw.getAttribute('aria-checked') === 'true';
+              if (checked) {
+                (sw as HTMLElement).click();
+              }
+            }
+          }
+        })
+        .catch(() => {});
+
+      const camSelectors = [
+        'button[data-tid="toggle-video"]',
+        'button[aria-label*="Turn camera off" i]',
+        'button[aria-label*="camera" i][aria-checked="true"]',
+      ];
+
+      for (const sel of camSelectors) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 500 }).catch(() => false)) {
+          const aria = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+          const checked = await btn.getAttribute('aria-checked').catch(() => '');
+          if (/turn off/i.test(aria) || checked === 'true') {
+            console.log(`[TeamsAdapter] Muting camera via ${sel}`);
+            await btn.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(200);
+            return;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  private async ensureMicrophoneOff(page: Page): Promise<void> {
+    try {
+      // Check mic switches / checkboxes
+      await page
+        .evaluate(() => {
+          const switches = Array.from(document.querySelectorAll('input[type="checkbox"], button[role="switch"]'));
+          for (const sw of switches) {
+            const label = (sw.getAttribute('aria-label') || '').toLowerCase();
+            const parent = (sw.closest('div')?.innerText || '').toLowerCase();
+            if (label.includes('mic') || label.includes('microphone') || parent.includes('mic')) {
+              const checked = (sw as HTMLInputElement).checked || sw.getAttribute('aria-checked') === 'true';
+              if (checked) {
+                (sw as HTMLElement).click();
+              }
+            }
+          }
+        })
+        .catch(() => {});
+
+      const micSelectors = [
+        'button[data-tid="toggle-mute"]',
+        'button[aria-label*="Mute mic" i]',
+        'button[aria-label*="Turn off microphone" i]',
+        'button[aria-label*="mic" i][aria-checked="true"]',
+      ];
+
+      for (const sel of micSelectors) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 500 }).catch(() => false)) {
+          const aria = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+          const checked = await btn.getAttribute('aria-checked').catch(() => '');
+          if (/mute mic/i.test(aria) || /turn off/i.test(aria) || checked === 'true') {
+            console.log(`[TeamsAdapter] Muting microphone via ${sel}`);
+            await btn.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(200);
+            return;
+          }
+        }
+      }
+
+      // Teams keyboard shortcut fallback: Control+Shift+M toggles microphone
+      const unmutedBtn = page
+        .locator('button[aria-label*="Mute mic" i], [data-tid="toggle-mute"][aria-checked="true"], [aria-label*="Mic on" i]')
+        .first();
+      if (await unmutedBtn.isVisible({ timeout: 200 }).catch(() => false)) {
+        console.log('[TeamsAdapter] Muting microphone via Control+Shift+M');
+        await page.keyboard.press('Control+Shift+M').catch(() => {});
+        await page.waitForTimeout(200);
+      }
+    } catch {}
+  }
+}
