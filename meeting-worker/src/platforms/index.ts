@@ -1,5 +1,81 @@
 import type { Page } from 'playwright';
 import type { MeetingPlatform, PlatformAdapter, MeetingState } from '../types.js';
+import { TeamsAdapter } from './teams.js';
+export { TeamsAdapter } from './teams.js';
+
+export async function ensureMicrophoneMuted(page: Page): Promise<boolean> {
+  try {
+    const micSelectors = [
+      'button[aria-label*="Turn off microphone" i]',
+      'div[role="button"][aria-label*="Turn off microphone" i]',
+      '[data-is-muted="false"][aria-label*="mic" i]',
+      'button[aria-label*="mute microphone" i]',
+      'div[role="button"][aria-label*="mute microphone" i]',
+      'button[aria-label*="microphone" i]',
+      'div[role="button"][aria-label*="microphone" i]',
+      'button[aria-label*="mic" i]',
+      'div[role="button"][aria-label*="mic" i]',
+      '[data-is-muted="false"]',
+    ];
+
+    for (const sel of micSelectors) {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+        const aria = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+        const isMuted = await btn.getAttribute('data-is-muted').catch(() => '');
+        if (/turn off/i.test(aria) || isMuted === 'false') {
+          console.log(`[Platform] Muting microphone via ${sel} (${aria})`);
+          await btn.click().catch(() => {});
+          await page.waitForTimeout(200);
+          return true;
+        }
+      }
+    }
+
+    // Google Meet keyboard shortcut fallback (Control+d)
+    const anyMic = page.locator('button[aria-label*="mic" i], div[role="button"][aria-label*="mic" i]').first();
+    if (await anyMic.isVisible({ timeout: 400 }).catch(() => false)) {
+      const aria = (await anyMic.getAttribute('aria-label').catch(() => '')) || '';
+      if (/turn off/i.test(aria)) {
+        console.log('[Platform] Muting microphone via Control+d shortcut');
+        await page.keyboard.press('Control+d').catch(() => {});
+        await page.waitForTimeout(200);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('[Platform] Error ensuring microphone muted:', err);
+  }
+  return false;
+}
+
+export async function ensureCameraMuted(page: Page): Promise<boolean> {
+  try {
+    const camSelectors = [
+      'button[aria-label*="Turn off camera" i]',
+      'div[role="button"][aria-label*="Turn off camera" i]',
+      'button[aria-label*="camera" i]',
+      'div[role="button"][aria-label*="camera" i]',
+      '[data-is-muted="false"][aria-label*="camera" i]',
+    ];
+
+    for (const sel of camSelectors) {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+        const aria = (await btn.getAttribute('aria-label').catch(() => '')) || '';
+        if (/turn off/i.test(aria)) {
+          console.log(`[Platform] Turning off camera via ${sel} (${aria})`);
+          await btn.click().catch(() => {});
+          await page.waitForTimeout(200);
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Platform] Error ensuring camera muted:', err);
+  }
+  return false;
+}
 
 export class GoogleMeetAdapter implements PlatformAdapter {
   readonly platform: MeetingPlatform = 'google_meet';
@@ -50,27 +126,11 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       }
     } catch {}
 
-    // 3. Ensure camera is muted without blindly toggling it on
-    try {
-      const camBtn = page.locator('button[aria-label*="camera" i]').first();
-      if (await camBtn.isVisible({ timeout: 500 }).catch(() => false)) {
-        const aria = (await camBtn.getAttribute('aria-label').catch(() => '')) || '';
-        if (/turn off/i.test(aria)) {
-          await camBtn.click().catch(() => {});
-        }
-      }
-    } catch {}
+    // 3. Ensure camera is muted
+    await ensureCameraMuted(page);
 
-    // 4. Ensure microphone is muted on join
-    try {
-      const micBtn = page.locator('button[aria-label*="microphone" i]').first();
-      if (await micBtn.isVisible({ timeout: 500 }).catch(() => false)) {
-        const aria = (await micBtn.getAttribute('aria-label').catch(() => '')) || '';
-        if (/turn off/i.test(aria)) {
-          await micBtn.click().catch(() => {});
-        }
-      }
-    } catch {}
+    // 4. Ensure microphone is muted on join (always off)
+    await ensureMicrophoneMuted(page);
   }
 
   async submitJoinRequest(page: Page, botName = 'Spectra'): Promise<void> {
@@ -114,6 +174,9 @@ export class GoogleMeetAdapter implements PlatformAdapter {
         await page.waitForTimeout(200);
       }
     }
+
+    // Ensure microphone is definitely muted immediately prior to clicking Join
+    await ensureMicrophoneMuted(page).catch(() => {});
 
     await primaryCta.click({ timeout: 2000 });
   }
@@ -324,6 +387,9 @@ export class GenericMeetingAdapter implements PlatformAdapter {
 export function getAdapterForUrl(url: string): PlatformAdapter {
   const google = new GoogleMeetAdapter();
   if (google.matches(url)) return google;
+
+  const teams = new TeamsAdapter();
+  if (teams.matches(url)) return teams;
 
   const zoom = new ZoomAdapter();
   if (zoom.matches(url)) return zoom;

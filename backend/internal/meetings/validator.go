@@ -155,7 +155,7 @@ func ValidateMeetingURL(rawInput string) (MeetingPlatform, string, string, error
 	}
 
 	// 4. Microsoft Teams
-	if strings.HasSuffix(host, "teams.microsoft.com") || strings.HasSuffix(host, "teams.live.com") {
+	if strings.HasSuffix(host, "teams.microsoft.com") || strings.HasSuffix(host, "teams.live.com") || strings.HasSuffix(host, "teams.cloud.microsoft") {
 		code := "teams-meeting"
 		path := strings.Trim(u.Path, "/")
 		segments := strings.Split(path, "/")

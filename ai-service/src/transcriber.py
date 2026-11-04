@@ -56,8 +56,8 @@ class WhisperTranscriber:
             logger.warning("faster-whisper not installed; running in fallback test mode")
             return None
 
-        # Apple Silicon and multi-core x86 perform best with 4 compute threads to avoid core thrashing
-        threads = min(4, max(1, os.cpu_count() or 4))
+        # Allocate all available CPU cores for maximum CTranslate2 INT8 throughput
+        threads = max(1, os.cpu_count() or 8)
 
         logger.info(
             "Loading Faster-Whisper model '%s' (device: %s, compute: %s, threads: %d)...",

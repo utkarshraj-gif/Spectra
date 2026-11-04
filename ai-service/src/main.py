@@ -208,7 +208,7 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     bytes_per_ms = 32  # 16000 * 2 / 1000 = 32 bytes per millisecond
     FRAME_BYTES = 3200  # 100ms per audio evaluation frame
     SILENCE_RMS_THRESHOLD = 0.0018  # speech vs background noise energy threshold
-    PAUSE_FRAMES_ENDPOINT = 12  # 1.2s silence pause endpoints a natural speech utterance
+    PAUSE_FRAMES_ENDPOINT = 7  # 700ms silence pause endpoints natural speech for real-time responsiveness
     MIN_SPEECH_FRAMES = 4  # 400ms min active speech to eliminate clicks and taps
     MAX_UTTERANCE_BYTES = chunk_sample_rate * bytes_per_sample * 15  # 15s max utterance chunk
 
@@ -220,6 +220,7 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     active_speech_frames = 0
     utterance_start_ms = 0
     total_stream_bytes = 0
+    session_start_time = asyncio.get_event_loop().time()
 
     active_speaker = "Speaker 1"
     known_speakers: Set[str] = set()
@@ -278,12 +279,14 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
     try:
         while True:
             try:
-                # Wait for next websocket message (max 0.2s so natural silence pause can trigger)
+                # Wait for next websocket message (max 0.2s so natural silence pause triggers promptly)
                 message = await asyncio.wait_for(websocket.receive(), timeout=0.2)
             except asyncio.TimeoutError:
-                # If currently in speech and silence frames have reached the pause endpoint threshold:
-                if speech_started and consecutive_silence_frames >= PAUSE_FRAMES_ENDPOINT:
-                    await flush_active_utterance()
+                # If currently in speech, advance silence frame count (0.2s timeout = two 100ms silence frames)
+                if speech_started:
+                    consecutive_silence_frames += 2
+                    if consecutive_silence_frames >= PAUSE_FRAMES_ENDPOINT:
+                        await flush_active_utterance()
                 continue
 
             if "bytes" in message and message["bytes"]:
@@ -293,7 +296,10 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                     frame = bytes(raw_queue[:FRAME_BYTES])
                     del raw_queue[:FRAME_BYTES]
 
-                    frame_time_ms = int(total_stream_bytes / bytes_per_ms)
+                    # Calculate wall-clock timestamp relative to meeting session start
+                    wall_ms = int((asyncio.get_event_loop().time() - session_start_time) * 1000)
+                    stream_ms = int(total_stream_bytes / bytes_per_ms)
+                    frame_time_ms = max(wall_ms, stream_ms)
                     total_stream_bytes += FRAME_BYTES
                     rms = pcm_frame_rms(frame)
 
@@ -337,6 +343,8 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
                                 known_speakers.add(active_speaker)
                                 initial_prompt = f"Speakers: {', '.join(sorted(known_speakers))}. Spectra meeting transcription."
                                 logger.info("Meeting %s active speaker changed to '%s'", meeting_id, active_speaker)
+                    elif msg_type == "PING":
+                        await websocket.send_json({"event": "PONG", "timestamp": payload.get("timestamp")})
                     elif msg_type == "FLUSH":
                         if speech_started and active_speech_frames >= MIN_SPEECH_FRAMES:
                             await flush_active_utterance()
@@ -351,4 +359,5 @@ async def websocket_transcribe(websocket: WebSocket, meeting_id: str):
             except Exception:
                 pass
     except Exception as exc:
-        logger.error("WebSocket error for meeting %s: %s", meeting_id, exc)
+        if "disconnect message has been received" not in str(exc):
+            logger.error("WebSocket error for meeting %s: %s", meeting_id, exc)

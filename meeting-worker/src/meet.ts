@@ -3,7 +3,7 @@ import { createMeetingContext, cleanupProfileDir } from './browser.js';
 import { config } from './config.js';
 import { MeetingState, SessionStatusEvent, PlatformAdapter } from './types.js';
 import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile, LiveAudioStreamer } from './audio/index.js';
-import { getAdapterForUrl } from './platforms/index.js';
+import { getAdapterForUrl, ensureMicrophoneMuted } from './platforms/index.js';
 
 export class MeetingSession {
   public readonly meetingId: string;
@@ -37,6 +37,10 @@ export class MeetingSession {
 
   public getState(): MeetingState {
     return this.state;
+  }
+
+  public getPage(): Page | null {
+    return this.page;
   }
 
   private transitionTo(newState: MeetingState, message?: string, details?: Record<string, unknown>) {
@@ -96,25 +100,19 @@ export class MeetingSession {
 
       if (admitted) {
         this.transitionTo('IN_MEETING', 'Bot successfully joined meeting room');
-        this.startInMeetingMonitor();
 
-        // Open People panel to ensure participant names and microphone states are directly visible in DOM
-        try {
-          const isPeoplePanelOpen = await this.page.evaluate(() => {
-            return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
-          });
-          if (!isPeoplePanelOpen) {
-            const peopleButton = this.page
-              .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
-              .first();
-            if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
-              await peopleButton.click().catch(() => {});
-            }
-          }
-        } catch {}
-
+        // 1. Immediately start audio capture for 0ms initial recording latency
         await this.startAudioCapture();
+
+        // 2. Enforce muted microphone immediately upon entering meeting room
+        await ensureMicrophoneMuted(this.page).catch(() => {});
+
+        // 3. Start in-meeting monitor and speaker observer
+        this.startInMeetingMonitor();
         await this.setupSpeakerObserver();
+
+        // 4. Open People panel in background (non-blocking)
+        this.openPeoplePanel().catch(() => {});
       } else {
         if (this.state !== 'ADMISSION_DENIED') {
           this.transitionTo('ADMISSION_DENIED', 'Admission timeout exceeded');
@@ -164,22 +162,36 @@ export class MeetingSession {
           }
         }
 
-        // 2. Check participant count
+        // 2. Ensure bot's own microphone remains muted
+        const inMeetingMicBtn = this.page
+          .locator(
+            'button[aria-label*="Turn off microphone" i], div[role="button"][aria-label*="Turn off microphone" i], [data-is-muted="false"][aria-label*="mic" i]'
+          )
+          .first();
+        if (await inMeetingMicBtn.isVisible({ timeout: 50 }).catch(() => false)) {
+          console.log('[MeetingSession] Bot microphone detected active in-meeting; auto-muting now.');
+          await inMeetingMicBtn.click().catch(() => {});
+        }
+
+        // 3. Check participant count
         const participantCount = await this.page.evaluate((botName) => {
           const botLower = (botName || '').trim().toLowerCase();
 
-          // Check People tab counter badge
-          const counterEl = document.querySelector(
-            '[aria-label*="people" i], [aria-label*="everyone" i], [data-tab-id="1"]'
+          // 1. Check People tab counter badge or header chips
+          const badges = Array.from(
+            document.querySelectorAll(
+              'button[aria-label*="people" i], button[aria-label*="everyone" i], button[aria-label*="participant" i], div[aria-label*="people" i], [data-tab-id="1"]'
+            )
           );
-          if (counterEl) {
-            const countMatch = (counterEl.textContent || counterEl.getAttribute('aria-label') || '').match(/\b([0-9]+)\b/);
-            if (countMatch) {
-              return parseInt(countMatch[1], 10);
+          for (const el of badges) {
+            const label = (el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '');
+            const m = label.match(/\b([2-9]|\d{2,})\b/);
+            if (m) {
+              return parseInt(m[1], 10);
             }
           }
 
-          // Check participant rows in People panel
+          // 2. Check participant rows in People panel
           const rows = document.querySelectorAll('[role="listitem"]');
           if (rows.length > 0) {
             let count = 0;
@@ -187,11 +199,26 @@ export class MeetingSession {
               const txt = (r.textContent || '').toLowerCase();
               if (txt && !txt.includes(botLower)) count++;
             });
-            return count > 0 ? count + 1 : 1;
+            if (count > 0) return count + 1;
           }
 
-          // Check video tiles
-          const tiles = document.querySelectorAll('div[data-participant-id], div[data-requested-participant-id]');
+          // 3. Check visible participant badges across grid tiles
+          const nameEls = document.querySelectorAll('[data-self-name], [jsname="Wb950c"], div[class*="name" i]');
+          const found = new Set();
+          nameEls.forEach((el) => {
+            const raw = (el.getAttribute('data-self-name') || el.textContent || '').trim().toLowerCase();
+            if (raw && !raw.includes(botLower) && raw.length >= 2 && raw.length <= 40) {
+              found.add(raw);
+            }
+          });
+          if (found.size > 0) {
+            return found.size + 1;
+          }
+
+          // 4. Video tiles
+          const tiles = document.querySelectorAll(
+            'div[data-participant-id], div[data-requested-participant-id], div[data-tile-id], div[data-allocation-index]'
+          );
           return tiles.length;
         }, this.botName).catch(() => -1);
 
@@ -199,12 +226,12 @@ export class MeetingSession {
           hadHumanParticipants = true;
           soloCounter = 0;
         } else if (participantCount === 1) {
-          // If human participants were previously confirmed, and bot is now the sole participant left
-          // for at least 15 seconds (10 checks) after the initial 30s grace period
-          if (hadHumanParticipants && Date.now() - joinedAt > 30000) {
+          // If human participants were previously confirmed, require at least 5 minutes (200 checks)
+          // of continuous solo state before auto-leaving, allowing users to pause, mute, or step away
+          if (hadHumanParticipants && Date.now() - joinedAt > 60000) {
             soloCounter++;
-            if (soloCounter >= 10) {
-              console.log(`[MeetingSession] All participants left meeting ${this.meetingId}. Leaving call automatically.`);
+            if (soloCounter >= 200) {
+              console.log(`[MeetingSession] All participants confirmed left meeting ${this.meetingId} for >5m. Leaving call.`);
               await this.leave('All participants have left the meeting');
               return;
             }
@@ -228,6 +255,23 @@ export class MeetingSession {
       clearInterval(this.monitorInterval);
       this.monitorInterval = null;
     }
+  }
+
+  private async openPeoplePanel(): Promise<void> {
+    if (!this.page) return;
+    try {
+      const isPeoplePanelOpen = await this.page.evaluate(() => {
+        return !!document.querySelector('div[role="tabpanel"], div[aria-label*="People" i][role="region"], div[data-tab-id="1"]');
+      });
+      if (!isPeoplePanelOpen) {
+        const peopleButton = this.page
+          .locator('button[aria-label*="People" i], button[aria-label*="Show everyone" i], button[data-tab-id="1"]')
+          .first();
+        if (await peopleButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await peopleButton.click().catch(() => {});
+        }
+      }
+    } catch {}
   }
 
   private async startAudioCapture(): Promise<void> {
@@ -265,7 +309,7 @@ export class MeetingSession {
 
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
-        silenceThreshold: 0.0008,
+        silenceThreshold: 0.0004,
         onPcmChunk: ({ pcmBuffer }) => {
           if (this.streamer) {
             this.streamer.sendPcmChunk(pcmBuffer);
@@ -362,12 +406,15 @@ export class MeetingSession {
             const foundNames = new Set<string>();
             let activeSpeaker: string | null = null;
 
-            // 1. Google Meet Video grid tiles & badges (Checked first for active speaking indicators)
+            // 1. Video grid tiles & badges across platforms (Google Meet, Microsoft Teams, Zoom)
             const tileSelectors = [
               'div[data-participant-id]',
               'div[data-requested-participant-id]',
               'div[data-tile-id]',
               'div[data-allocation-index]',
+              'div[data-tid="calling-participant-stream"]',
+              'div[data-tid="calling-participant-tile"]',
+              'div[data-tid="participant-item"]',
               'div[role="region"]',
             ];
 
@@ -551,6 +598,12 @@ export class MeetingSession {
     try {
       if (this.page && !this.page.isClosed()) {
         await this.page.close().catch(() => {});
+      }
+      if (this.context) {
+        await this.context.close().catch(() => {});
+      }
+      if (this.profileDir) {
+        cleanupProfileDir(this.profileDir);
       }
     } finally {
       this.page = null;
