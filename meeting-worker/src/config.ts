@@ -2,7 +2,7 @@ export const config = {
   port: parseInt(process.env.PORT || '5001', 10),
   defaultBotName: process.env.BOT_NAME || 'Spectra Assistant (Recording)',
   get headless(): boolean {
-    return process.env.HEADLESS !== 'false';
+    return process.env.HEADLESS === undefined ? process.platform !== 'win32' : process.env.HEADLESS !== 'false';
   },
   recordingsPath: process.env.RECORDINGS_PATH || './recordings',
   admissionTimeoutMs: parseInt(process.env.ADMISSION_TIMEOUT_MS || '300000', 10), // 5 minutes

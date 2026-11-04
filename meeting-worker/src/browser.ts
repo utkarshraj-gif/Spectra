@@ -1,11 +1,11 @@
 import fs from 'fs';
-import path from 'path';
-import type { BrowserContext } from 'playwright';
+import type { Browser, BrowserContext, BrowserContextOptions } from 'playwright';
 // @ts-ignore
 import { chromium } from 'playwright-extra';
 // @ts-ignore
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { config } from './config.js';
+import { getStoragePath, hasGoogleSession } from './auth.js';
 
 // Configure stealth evasions for meeting bot automation
 const stealth = StealthPlugin();
@@ -34,7 +34,7 @@ export interface CreateMeetingContextOptions {
   headless?: boolean;
 }
 
-let sharedBrowser: any = null;
+let sharedBrowser: Browser | null = null;
 
 export async function prewarmBrowserContext(options?: CreateMeetingContextOptions): Promise<void> {
   const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
@@ -51,7 +51,7 @@ export async function prewarmBrowserContext(options?: CreateMeetingContextOption
         sharedBrowser = await chromium.launch(baseOptions);
       }
     }
-    console.log('[Browser] Chrome automation environment pre-warmed and ready');
+    console.log(`[Browser] Chrome ready (mode=${isHeadless ? 'headless' : 'headed'})`);
   } catch (err) {
     console.warn('[Browser] Chrome pre-warming warning:', err);
   }
@@ -60,10 +60,9 @@ export async function prewarmBrowserContext(options?: CreateMeetingContextOption
 export async function createMeetingContext(
   meetingId: string,
   options?: CreateMeetingContextOptions
-): Promise<{ context: BrowserContext; profileDir: string }> {
+): Promise<{ context: BrowserContext }> {
   const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
-  const baseProfileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
-  const storagePath = path.join(baseProfileDir, 'storage.json');
+  const storagePath = getStoragePath();
 
   if (!sharedBrowser || !sharedBrowser.isConnected()) {
     const baseOptions = {
@@ -78,7 +77,7 @@ export async function createMeetingContext(
     }
   }
 
-  const contextOptions: any = {
+  const contextOptions: BrowserContextOptions = {
     permissions: ['microphone', 'camera'],
     viewport: { width: 1280, height: 720 },
     locale: 'en-US',
@@ -90,7 +89,9 @@ export async function createMeetingContext(
   }
 
   // Create isolated, in-memory browser context per meeting session to eliminate cross-meeting state bleed
+  if (!sharedBrowser) throw new Error('Meeting browser failed to start.');
   const context: BrowserContext = await sharedBrowser.newContext(contextOptions);
+  console.log(`[Browser] ${meetingId}: Google session cookies ${await hasGoogleSession(context) ? 'loaded' : 'absent'}; storage=${storagePath}`);
 
   // Ensure bot never exposes synthetic green test video to meetings
   await context.addInitScript(() => {
@@ -130,13 +131,5 @@ export async function createMeetingContext(
     } catch {}
   });
 
-  return { context, profileDir: '' };
-}
-
-export function cleanupProfileDir(profileDir: string): void {
-  try {
-    if (profileDir && fs.existsSync(profileDir)) {
-      fs.rmSync(profileDir, { recursive: true, force: true });
-    }
-  } catch {}
+  return { context };
 }

@@ -33,7 +33,7 @@ async function runTests() {
   for (const url of nonGoogleUrls) {
     assert.strictEqual(adapter.matches(url), false, `Should not match non-Google URL: ${url}`);
   }
-  console.log('  âœ“ URL matching verified');
+  console.log('URL matching passed');
 
   // Test 2: URL Normalization
   console.log('Test 2: URL normalization');
@@ -45,7 +45,7 @@ async function runTests() {
     adapter.normalizeUrl('abc-defg-hij'),
     'https://meet.google.com/abc-defg-hij?hl=en'
   );
-  console.log('  âœ“ URL normalization verified');
+  console.log('URL normalization passed');
 
   // Test 3: Playwright DOM Execution Simulation
   console.log('Test 3: Browser DOM execution (modal dismissal, guest name, join submission)');
@@ -91,7 +91,7 @@ async function runTests() {
 
     const enteredName = await page.locator('input[aria-label="Your name"]').inputValue();
     assert.strictEqual(enteredName, 'Spectra Bot', 'Adapter should fill guest bot name');
-    console.log('  âœ“ Pre-join setup & join CTA submission verified');
+    console.log('Pre-join setup and join submission passed');
 
     // 3b. Blocked Screen Detection ("You can't join this video call")
     const blockedHtml = `
@@ -107,15 +107,15 @@ async function runTests() {
     `;
     await page.setContent(blockedHtml);
 
-    let errorThrown = false;
-    try {
-      await adapter.submitJoinRequest(page, 'Spectra Bot');
-    } catch (err: any) {
-      errorThrown = true;
-      assert.ok(err.message.includes("You can't join this video call"), 'Should throw informative error when blocked');
-    }
-    assert.strictEqual(errorThrown, true, 'Adapter should reject immediately when meeting is restricted');
-    console.log('  âœ“ Blocked meeting detection & descriptive rejection verified');
+    await assert.rejects(adapter.submitJoinRequest(page, 'Spectra Bot'), /No Google session cookies are loaded/);
+    await context.addCookies([{ name: 'SID', value: 'synthetic-test-session', domain: '.google.com', path: '/', secure: true }]);
+    await assert.rejects(adapter.submitJoinRequest(page, 'Spectra Bot'), /Google session cookies are present/);
+    await context.clearCookies();
+    await page.setContent('<h2>You can’t join this video call</h2>');
+    await assert.rejects(adapter.submitJoinRequest(page, 'Spectra Bot'), /No Google session cookies are loaded/);
+    await page.setContent('<h2>This meeting has already ended</h2>');
+    await assert.rejects(adapter.submitJoinRequest(page, 'Spectra Bot'), /meeting has ended/);
+    console.log('Access rejection checks passed');
 
     // 3c. Lobby Admission and In-Call State Detection
     const inMeetingHtml = `
@@ -136,42 +136,13 @@ async function runTests() {
 
     assert.strictEqual(admitted, true, 'Should detect in-call status');
     assert.strictEqual(states.includes('IN_MEETING'), true, 'Should report IN_MEETING state');
-    console.log('  âœ“ In-call admission confirmation verified');
+    console.log('Admission detection passed');
 
   } finally {
     await browser.close();
   }
 
-  // Test 4: Live URL Integration Verification
-  const liveUrl = process.env.TEST_MEET_URL || 'https://meet.google.com/vso-axqg-bjw';
-  console.log(`Test 4: Live URL execution verification against ${liveUrl}`);
-  const liveBrowser = await chromium.launch({ channel: 'chrome', headless: true });
-  const liveContext = await liveBrowser.newContext({
-    permissions: ['microphone', 'camera'],
-    locale: 'en-US',
-  });
-  const livePage = await liveContext.newPage();
-  try {
-    const normalized = adapter.normalizeUrl(liveUrl);
-    assert.ok(normalized.includes('vso-axqg-bjw'), 'Normalized URL must retain meeting code');
-    await livePage.goto(normalized, { waitUntil: 'domcontentloaded' });
-
-    let detectedStatus = 'JOINED_OR_REQUESTED';
-    try {
-      await adapter.submitJoinRequest(livePage, 'Spectra');
-    } catch (err: any) {
-      if (err.message.includes("You can't join this video call")) {
-        detectedStatus = 'RESTRICTED_ACCESS_DETECTED';
-      } else {
-        throw err;
-      }
-    }
-    console.log(`  ✓ Live URL execution verified against real link (Outcome: ${detectedStatus})`);
-  } finally {
-    await liveBrowser.close();
-  }
-
-  console.log('[TestGoogleMeetAdapter] All Google Meet verification tests passed successfully!\n');
+  console.log('[TestGoogleMeetAdapter] All tests passed.');
 }
 
 runTests().catch(err => {

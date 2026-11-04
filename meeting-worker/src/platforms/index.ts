@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { MeetingPlatform, PlatformAdapter, MeetingState, ParticipantEventPayload, ChatMessagePayload } from '../types.js';
 import { ZoomAdapter } from './zoom.js';
 import { TeamsAdapter } from './teams.js';
+import { hasGoogleSession } from '../auth.js';
 
 export { ZoomAdapter } from './zoom.js';
 export { TeamsAdapter } from './teams.js';
@@ -90,6 +91,19 @@ export async function ensureCameraMuted(page: Page): Promise<boolean> {
 export class GoogleMeetAdapter implements PlatformAdapter {
   readonly platform: MeetingPlatform = 'google_meet';
 
+  private async rejectBlockedMeeting(page: Page, bodyText: string): Promise<void> {
+    if (/this meeting has already ended/i.test(bodyText)) {
+      throw new Error('Google Meet meeting has ended. Ask the host for an active meeting link.');
+    }
+    if (/you can['’]t join this (video )?call|no one can join a meeting unless invited/i.test(bodyText)) {
+      const sessionPresent = await hasGoogleSession(page.context());
+      const action = sessionPresent
+        ? 'Google session cookies are present. Ask the host to invite the bot account and allow it to join; if its session expired, run login again.'
+        : 'No Google session cookies are loaded. Run "npm --prefix meeting-worker run login" in a desktop terminal, sign in, and save before closing Chrome.';
+      throw new Error(`Google Meet rejected join request: You can't join this video call. ${action} Meeting access and organization policy must permit the bot; signing in does not override those controls.`);
+    }
+  }
+
   matches(url: string): boolean {
     return url.includes('meet.google.com') || /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/.test(url.trim());
   }
@@ -167,11 +181,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
 
       // 3. Check for meeting restriction / ejection screen
       const bodyText = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
-      if (/you can't join this (video )?call|no one can join a meeting unless invited|this meeting has already ended/i.test(bodyText)) {
-        throw new Error(
-          "Google Meet rejected join request: Meeting access is restricted ('You can't join this video call'). The meeting host must set Meeting Access to 'Open' in Google Meet Host Controls, or the bot must be signed into an authorized Google account via 'npm run login'."
-        );
-      }
+      await this.rejectBlockedMeeting(page, bodyText);
 
       // 4. Fill guest name if input is visible
       const nameInput = page
@@ -202,7 +212,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
 
           if (!isDisabled) {
             await ensureMicrophoneMuted(page).catch(() => {});
-            await btn.click({ timeout: 2000 }).catch(() => {});
+            await btn.click({ timeout: 2000 });
             return;
           }
         }
@@ -213,11 +223,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
 
     // Final check for restriction screen if loop finishes
     const finalBodyText = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
-    if (/you can't join this (video )?call|no one can join a meeting unless invited|this meeting has already ended/i.test(finalBodyText)) {
-      throw new Error(
-        "Google Meet rejected join request: Meeting access is restricted ('You can't join this video call'). The meeting host must set Meeting Access to 'Open' in Google Meet Host Controls, or the bot must be signed into an authorized Google account via 'npm run login'."
-      );
-    }
+    await this.rejectBlockedMeeting(page, finalBodyText);
 
     throw new Error('Google Meet pre-join interface did not render a clickable join button within 10 seconds.');
   }
@@ -248,6 +254,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
 
     const GOOGLE_DENIED_INDICATORS = [
       'text="You can\'t join this call"',
+      'text="You can\'t join this video call"',
       'text="You were removed from the meeting"',
       'text="Someone denied your request to join"',
       'text="Your request to join was denied"',
@@ -300,7 +307,8 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       for (const sel of GOOGLE_DENIED_INDICATORS) {
         const el = page.locator(sel).first();
         if (await el.isVisible({ timeout: 50 }).catch(() => false)) {
-          onStateChange('ADMISSION_DENIED', 'Admission to Google Meet was denied or room is full');
+          const reason = await el.innerText().catch(() => 'Access denied');
+          onStateChange('ADMISSION_DENIED', `Google Meet denied admission: ${reason}`);
           return false;
         }
       }
