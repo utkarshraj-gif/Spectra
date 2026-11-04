@@ -1,5 +1,7 @@
 import type { Page } from 'playwright';
 import type { MeetingPlatform, PlatformAdapter, MeetingState } from '../types.js';
+import { TeamsAdapter } from './teams.js';
+export { TeamsAdapter } from './teams.js';
 
 export async function ensureMicrophoneMuted(page: Page): Promise<boolean> {
   try {
@@ -385,6 +387,9 @@ export class GenericMeetingAdapter implements PlatformAdapter {
 export function getAdapterForUrl(url: string): PlatformAdapter {
   const google = new GoogleMeetAdapter();
   if (google.matches(url)) return google;
+
+  const teams = new TeamsAdapter();
+  if (teams.matches(url)) return teams;
 
   const zoom = new ZoomAdapter();
   if (zoom.matches(url)) return zoom;

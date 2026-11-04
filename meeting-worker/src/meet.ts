@@ -39,6 +39,10 @@ export class MeetingSession {
     return this.state;
   }
 
+  public getPage(): Page | null {
+    return this.page;
+  }
+
   private transitionTo(newState: MeetingState, message?: string, details?: Record<string, unknown>) {
     if (this.isDestroyed && newState !== 'CALL_ENDED' && newState !== 'FAILED') {
       return;
@@ -402,12 +406,15 @@ export class MeetingSession {
             const foundNames = new Set<string>();
             let activeSpeaker: string | null = null;
 
-            // 1. Google Meet Video grid tiles & badges (Checked first for active speaking indicators)
+            // 1. Video grid tiles & badges across platforms (Google Meet, Microsoft Teams, Zoom)
             const tileSelectors = [
               'div[data-participant-id]',
               'div[data-requested-participant-id]',
               'div[data-tile-id]',
               'div[data-allocation-index]',
+              'div[data-tid="calling-participant-stream"]',
+              'div[data-tid="calling-participant-tile"]',
+              'div[data-tid="participant-item"]',
               'div[role="region"]',
             ];
 
@@ -591,6 +598,12 @@ export class MeetingSession {
     try {
       if (this.page && !this.page.isClosed()) {
         await this.page.close().catch(() => {});
+      }
+      if (this.context) {
+        await this.context.close().catch(() => {});
+      }
+      if (this.profileDir) {
+        cleanupProfileDir(this.profileDir);
       }
     } finally {
       this.page = null;
