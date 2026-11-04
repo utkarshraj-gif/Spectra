@@ -18,6 +18,7 @@ export interface StartSessionPayload {
   meeting_url: string;
   platform?: MeetingPlatform;
   bot_name?: string;
+  passcode?: string;
 }
 
 export interface StopSessionPayload {
@@ -33,8 +34,31 @@ export interface LiveTranscriptSegment {
   is_final: boolean;
 }
 
+export interface ParticipantEventPayload {
+  participant_id: string;
+  name: string;
+  timestamp_ms: number;
+}
+
+export interface ChatMessagePayload {
+  message_id?: string;
+  sender: string;
+  text: string;
+  timestamp_ms: number;
+}
+
 export interface SessionStatusEvent {
-  event: 'STATE_CHANGE' | 'HEARTBEAT' | 'ERROR' | 'LOG' | 'AUDIO_READY' | 'TRANSCRIPT_SEGMENT' | 'SPEAKER_ACTIVE';
+  event:
+    | 'STATE_CHANGE'
+    | 'HEARTBEAT'
+    | 'ERROR'
+    | 'LOG'
+    | 'AUDIO_READY'
+    | 'TRANSCRIPT_SEGMENT'
+    | 'SPEAKER_ACTIVE'
+    | 'PARTICIPANT_JOINED'
+    | 'PARTICIPANT_LEFT'
+    | 'CHAT_MESSAGE';
   meeting_id: string;
   state: MeetingState;
   timestamp: number;
@@ -46,12 +70,20 @@ export interface PlatformAdapter {
   readonly platform: MeetingPlatform;
   matches(url: string): boolean;
   normalizeUrl(rawUrl: string): string;
-  configurePreJoin(page: Page, botName: string): Promise<void>;
-  submitJoinRequest(page: Page): Promise<void>;
+  configurePreJoin(page: Page, botName: string, passcode?: string): Promise<void>;
+  submitJoinRequest(page: Page, botName?: string): Promise<void>;
   waitForAdmission(
     page: Page,
     timeoutMs: number,
     onStateChange: (state: MeetingState, message: string) => void
   ): Promise<boolean>;
   leave(page: Page): Promise<void>;
+  setupRosterObserver?(
+    page: Page,
+    onEvent: (type: 'JOINED' | 'LEFT', p: ParticipantEventPayload) => void
+  ): Promise<void>;
+  setupChatObserver?(
+    page: Page,
+    onMessage: (msg: ChatMessagePayload) => void
+  ): Promise<void>;
 }

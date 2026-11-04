@@ -7,14 +7,14 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { config } from './config.js';
 
-// Configure stealth evasions for Google Meet bot automation
+// Configure stealth evasions for meeting bot automation
 const stealth = StealthPlugin();
 stealth.enabledEvasions.delete('iframe.contentWindow');
 stealth.enabledEvasions.delete('media.codecs');
 stealth.enabledEvasions.delete('user-agent-override');
 chromium.use(stealth);
 
-// Canonical browser args for Google Meet & Microsoft Teams bot automation
+// Canonical browser args for stealth meeting joins (Google Meet, Zoom, Teams)
 export const SPECTRA_JOIN_BROWSER_ARGS: readonly string[] = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -83,7 +83,7 @@ export async function createMeetingContext(
     locale: 'en-US',
   });
 
-  // Ensure bot never exposes synthetic green test video to Google Meet
+  // Ensure bot never exposes synthetic green test video to meetings
   await context.addInitScript(() => {
     try {
       // Do not mutate media stream contracts for Microsoft Teams calling agents

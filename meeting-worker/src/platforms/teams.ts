@@ -1,11 +1,11 @@
 import type { Page } from 'playwright';
-import type { MeetingPlatform, PlatformAdapter, MeetingState } from '../types.js';
+import type { MeetingPlatform, PlatformAdapter, MeetingState, ParticipantEventPayload, ChatMessagePayload } from '../types.js';
 
 /**
  * TeamsAdapter — Enterprise adapter for Microsoft Teams Web client.
  * Handles direct Light Meetings normalization, app-launcher bypass, guest name configuration,
  * audio/video modal dismissal, pre-join mute controls, lobby detection, admission monitoring,
- * and in-call tear down.
+ * in-call tear down, and participant/chat observation.
  */
 export class TeamsAdapter implements PlatformAdapter {
   readonly platform: MeetingPlatform = 'teams';
@@ -206,6 +206,92 @@ export class TeamsAdapter implements PlatformAdapter {
           break;
         }
       }
+    } catch {}
+  }
+
+  async setupRosterObserver(
+    page: Page,
+    onEvent: (type: 'JOINED' | 'LEFT', p: ParticipantEventPayload) => void
+  ): Promise<void> {
+    try {
+      const bridgeFn = `__spectraTeamsRosterBridge_${Date.now()}`;
+      await page.exposeFunction(bridgeFn, (type: 'JOINED' | 'LEFT', name: string) => {
+        if (!name) return;
+        onEvent(type, {
+          participant_id: name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
+          name,
+          timestamp_ms: Date.now(),
+        });
+      });
+
+      await page.evaluate((fnName) => {
+        const currentParticipants = new Set<string>();
+
+        function scanParticipants() {
+          const found = new Set<string>();
+          document.querySelectorAll('[data-tid="roster-participant"], [data-tid="participant-item"]').forEach((el) => {
+            const nameEl = el.querySelector('[data-tid="participant-name"], span');
+            const name = (nameEl?.textContent || '').replace(/\(Guest\)/gi, '').trim();
+            if (name && name.length >= 2) {
+              found.add(name);
+            }
+          });
+
+          for (const name of found) {
+            if (!currentParticipants.has(name)) {
+              currentParticipants.add(name);
+              (window as any)[fnName]('JOINED', name);
+            }
+          }
+
+          for (const name of currentParticipants) {
+            if (!found.has(name)) {
+              currentParticipants.delete(name);
+              (window as any)[fnName]('LEFT', name);
+            }
+          }
+        }
+
+        setInterval(scanParticipants, 2000);
+      }, bridgeFn);
+    } catch {}
+  }
+
+  async setupChatObserver(
+    page: Page,
+    onMessage: (msg: ChatMessagePayload) => void
+  ): Promise<void> {
+    try {
+      const bridgeFn = `__spectraTeamsChatBridge_${Date.now()}`;
+      await page.exposeFunction(bridgeFn, (sender: string, text: string) => {
+        if (!text) return;
+        onMessage({
+          message_id: `teams_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          sender: sender || 'Participant',
+          text,
+          timestamp_ms: Date.now(),
+        });
+      });
+
+      await page.evaluate((fnName) => {
+        const seenMessages = new Set<string>();
+
+        function scanChat() {
+          document.querySelectorAll('[data-tid="chat-message"], .ui-chat__item').forEach((el) => {
+            const senderEl = el.querySelector('[data-tid="chat-message-author"], .ui-chat__message__author');
+            const textEl = el.querySelector('[data-tid="chat-message-body"], .ui-chat__message__content');
+            const sender = (senderEl?.textContent || 'Participant').trim();
+            const text = (textEl?.textContent || '').trim();
+            const key = `${sender}:${text}`;
+            if (text && !seenMessages.has(key)) {
+              seenMessages.add(key);
+              (window as any)[fnName](sender, text);
+            }
+          });
+        }
+
+        setInterval(scanChat, 1500);
+      }, bridgeFn);
     } catch {}
   }
 

@@ -9,6 +9,7 @@ export class MeetingSession {
   public readonly meetingId: string;
   public readonly meetingUrl: string;
   public readonly botName: string;
+  public readonly passcode?: string;
 
   private adapter: PlatformAdapter;
   private context: BrowserContext | null = null;
@@ -17,6 +18,7 @@ export class MeetingSession {
   private state: MeetingState = 'INITIALIZING';
   private onEventCallback: (event: SessionStatusEvent) => void;
   private monitorInterval: NodeJS.Timeout | null = null;
+  private maxDurationTimer: NodeJS.Timeout | null = null;
   private audioCaptureSession: AudioCaptureSession | null = null;
   private streamer: LiveAudioStreamer | null = null;
   private currentSpeaker = '';
@@ -26,13 +28,21 @@ export class MeetingSession {
     meetingId: string,
     meetingUrl: string,
     botName?: string,
+    passcodeOrOnEvent?: string | ((event: SessionStatusEvent) => void),
     onEvent?: (event: SessionStatusEvent) => void
   ) {
     this.meetingId = meetingId;
     this.adapter = getAdapterForUrl(meetingUrl);
     this.meetingUrl = this.adapter.normalizeUrl(meetingUrl);
     this.botName = botName || config.defaultBotName;
-    this.onEventCallback = onEvent || (() => {});
+
+    if (typeof passcodeOrOnEvent === 'function') {
+      this.onEventCallback = passcodeOrOnEvent;
+      this.passcode = undefined;
+    } else {
+      this.passcode = passcodeOrOnEvent;
+      this.onEventCallback = onEvent || (() => {});
+    }
   }
 
   public getState(): MeetingState {
@@ -61,6 +71,14 @@ export class MeetingSession {
 
   public async start(): Promise<void> {
     try {
+      // 1. Arm hard session duration watchdog (3-hour limit per session)
+      this.maxDurationTimer = setTimeout(async () => {
+        if (!this.isDestroyed) {
+          console.warn(`[MeetingSession] Max session duration (${config.maxSessionDurationMs / 3600000}h) reached for ${this.meetingId}. Auto-leaving.`);
+          await this.leave(`Session exceeded maximum allowed duration (${config.maxSessionDurationMs / 3600000} hours)`);
+        }
+      }, config.maxSessionDurationMs);
+
       this.transitionTo('INITIALIZING', `Launching browser context for ${this.adapter.platform}`);
       const { context, profileDir } = await createMeetingContext(this.meetingId);
       this.context = context;
@@ -78,20 +96,20 @@ export class MeetingSession {
       }
       page.setDefaultTimeout(config.navigationTimeoutMs);
 
-      // Navigate
+      // 2. Navigate
       this.transitionTo('NAVIGATING', `Navigating to ${this.meetingUrl}`);
       await page.goto(this.meetingUrl, { waitUntil: 'domcontentloaded' }).catch(async () => {
         await page.goto(this.meetingUrl, { waitUntil: 'commit' });
       });
 
-      // Pre-Join Setup
+      // 3. Pre-Join Setup
       this.transitionTo('PRE_JOIN', 'Configuring pre-join devices and identity');
-      await this.adapter.configurePreJoin(this.page, this.botName);
+      await this.adapter.configurePreJoin(this.page, this.botName, this.passcode);
 
-      // Submit Join Request
-      await this.adapter.submitJoinRequest(this.page);
+      // 4. Submit Join Request
+      await this.adapter.submitJoinRequest(this.page, this.botName);
 
-      // Monitor Admission State
+      // 5. Monitor Admission State
       const admitted = await this.adapter.waitForAdmission(
         this.page,
         config.admissionTimeoutMs,
@@ -113,6 +131,44 @@ export class MeetingSession {
 
         // 4. Open People panel in background (non-blocking)
         this.openPeoplePanel().catch(() => {});
+
+        // 5. Setup In-Meeting Participant Roster Observer (Task G-2)
+        if (this.adapter.setupRosterObserver) {
+          await this.adapter.setupRosterObserver(this.page, (type, p) => {
+            this.onEventCallback({
+              event: type === 'JOINED' ? 'PARTICIPANT_JOINED' : 'PARTICIPANT_LEFT',
+              meeting_id: this.meetingId,
+              state: this.state,
+              timestamp: p.timestamp_ms || Date.now(),
+              message: `${p.name} ${type === 'JOINED' ? 'joined' : 'left'} the meeting`,
+              details: {
+                participant_id: p.participant_id,
+                name: p.name,
+                action: type,
+                timestamp_ms: p.timestamp_ms,
+              },
+            });
+          });
+        }
+
+        // 6. Setup In-Meeting Chat Scraper Observer (Task G-2)
+        if (this.adapter.setupChatObserver) {
+          await this.adapter.setupChatObserver(this.page, (msg) => {
+            this.onEventCallback({
+              event: 'CHAT_MESSAGE',
+              meeting_id: this.meetingId,
+              state: this.state,
+              timestamp: msg.timestamp_ms || Date.now(),
+              message: `${msg.sender}: ${msg.text}`,
+              details: {
+                message_id: msg.message_id,
+                sender: msg.sender,
+                text: msg.text,
+                timestamp_ms: msg.timestamp_ms,
+              },
+            });
+          });
+        }
       } else {
         if (this.state !== 'ADMISSION_DENIED') {
           this.transitionTo('ADMISSION_DENIED', 'Admission timeout exceeded');
@@ -131,7 +187,7 @@ export class MeetingSession {
 
     const joinedAt = Date.now();
     let hadHumanParticipants = false;
-    let soloCounter = 0;
+    let loneBotStartTime: number | null = null;
 
     this.monitorInterval = setInterval(async () => {
       if (this.isDestroyed || !this.page || this.page.isClosed()) {
@@ -140,14 +196,19 @@ export class MeetingSession {
       }
 
       try {
-        // 1. Check for explicit meeting termination / ejection indicators
+        // 1. Check for explicit meeting termination / ejection screens across Google Meet, Zoom, Teams
         const ENDED_SELECTORS = [
           'text=/You left the meeting/i',
           'text=/The call has ended/i',
           'text=/Meeting ended/i',
           'text=/Your call was ended/i',
           'text=/ended the meeting for everyone/i',
+          'text=/The meeting has ended for everyone/i',
           'text=/removed from the meeting/i',
+          'text=/The host has ended this meeting/i',
+          'text=/You have been removed by the host/i',
+          'text=/Meeting ended by host/i',
+          'text=/You\'ve been kicked out/i',
           'text=/Return to home screen/i',
           'text=/You can\'t join this video call/i',
           'text=/This meeting has already ended/i',
@@ -155,8 +216,8 @@ export class MeetingSession {
         ];
 
         for (const sel of ENDED_SELECTORS) {
-          if (await this.page.locator(sel).first().isVisible().catch(() => false)) {
-            this.transitionTo('CALL_ENDED', 'Meeting has ended or host ended call');
+          if (await this.page.locator(sel).first().isVisible({ timeout: 100 }).catch(() => false)) {
+            this.transitionTo('CALL_ENDED', 'Meeting ended by host or bot ejected');
             await this.cleanup();
             return;
           }
@@ -177,7 +238,7 @@ export class MeetingSession {
         const participantCount = await this.page.evaluate((botName) => {
           const botLower = (botName || '').trim().toLowerCase();
 
-          // 1. Check People tab counter badge or header chips
+          // 1. Check People tab counter badge or header chips (Google Meet, Teams)
           const badges = Array.from(
             document.querySelectorAll(
               'button[aria-label*="people" i], button[aria-label*="everyone" i], button[aria-label*="participant" i], div[aria-label*="people" i], [data-tab-id="1"]'
@@ -191,8 +252,17 @@ export class MeetingSession {
             }
           }
 
-          // 2. Check participant rows in People panel
-          const rows = document.querySelectorAll('[role="listitem"]');
+          // 2. Check Zoom participant count header
+          const zoomCountEl = document.querySelector('.footer-button__number-counter, .participants-header__title');
+          if (zoomCountEl) {
+            const countMatch = (zoomCountEl.textContent || '').match(/\b([0-9]+)\b/);
+            if (countMatch) {
+              return parseInt(countMatch[1], 10);
+            }
+          }
+
+          // 3. Check participant rows in People panel
+          const rows = document.querySelectorAll('[role="listitem"], .participants-item__display-name, [data-tid="roster-participant"]');
           if (rows.length > 0) {
             let count = 0;
             rows.forEach((r) => {
@@ -202,7 +272,7 @@ export class MeetingSession {
             if (count > 0) return count + 1;
           }
 
-          // 3. Check visible participant badges across grid tiles
+          // 4. Check visible participant badges across grid tiles
           const nameEls = document.querySelectorAll('[data-self-name], [jsname="Wb950c"], div[class*="name" i]');
           const found = new Set();
           nameEls.forEach((el) => {
@@ -215,24 +285,25 @@ export class MeetingSession {
             return found.size + 1;
           }
 
-          // 4. Video tiles
+          // 5. Video tiles
           const tiles = document.querySelectorAll(
-            'div[data-participant-id], div[data-requested-participant-id], div[data-tile-id], div[data-allocation-index]'
+            'div[data-participant-id], div[data-requested-participant-id], div[data-tile-id], div[data-allocation-index], [data-testid="participant-tile"]'
           );
           return tiles.length;
         }, this.botName).catch(() => -1);
 
+        // 4. Intelligent "Lone Bot" Auto-Departure (Task G-3)
+        // If human participants were confirmed, and bot is left alone for > 90 seconds
         if (participantCount > 1) {
           hadHumanParticipants = true;
-          soloCounter = 0;
+          loneBotStartTime = null;
         } else if (participantCount === 1) {
-          // If human participants were previously confirmed, require at least 5 minutes (200 checks)
-          // of continuous solo state before auto-leaving, allowing users to pause, mute, or step away
-          if (hadHumanParticipants && Date.now() - joinedAt > 60000) {
-            soloCounter++;
-            if (soloCounter >= 200) {
-              console.log(`[MeetingSession] All participants confirmed left meeting ${this.meetingId} for >5m. Leaving call.`);
-              await this.leave('All participants have left the meeting');
+          if (hadHumanParticipants && Date.now() - joinedAt > 15000) {
+            if (loneBotStartTime === null) {
+              loneBotStartTime = Date.now();
+            } else if (Date.now() - loneBotStartTime >= config.loneBotTimeoutMs) {
+              console.log(`[MeetingSession] Lone bot departure: sole participant for >${config.loneBotTimeoutMs / 1000}s in ${this.meetingId}. Auto-leaving.`);
+              await this.leave('Lone bot departure: no other participants present for >90s');
               return;
             }
           }
@@ -243,11 +314,17 @@ export class MeetingSession {
           meeting_id: this.meetingId,
           state: this.state,
           timestamp: Date.now(),
+          details: {
+            duration_ms: Date.now() - joinedAt,
+            participant_count: participantCount,
+            active_speaker: this.currentSpeaker || undefined,
+            lone_bot_seconds: loneBotStartTime ? Math.round((Date.now() - loneBotStartTime) / 1000) : 0,
+          },
         });
-      } catch {
-        // Non-critical
+      } catch (err) {
+        console.warn(`[MeetingSession] Monitor loop error:`, err);
       }
-    }, 1500);
+    }, 2000);
   }
 
   private stopMonitoring(): void {
@@ -277,7 +354,8 @@ export class MeetingSession {
   private async startAudioCapture(): Promise<void> {
     if (!this.page || this.audioCaptureSession) return;
     try {
-      const wsUrl = `${config.aiServiceWsUrl}/ws/transcribe/${this.meetingId}`;
+      const wsUrl = `${config.aiServiceWsUrl}?meeting_id=${this.meetingId}`;
+
       this.streamer = new LiveAudioStreamer({
         aiServiceWsUrl: wsUrl,
         meetingId: this.meetingId,
@@ -309,6 +387,7 @@ export class MeetingSession {
 
       this.audioCaptureSession = await startMeetingAudioCapture(this.page, {
         meetingId: this.meetingId,
+        outputDirectory: config.recordingsPath,
         silenceThreshold: 0.0004,
         onPcmChunk: ({ pcmBuffer }) => {
           if (this.streamer) {
@@ -358,15 +437,10 @@ export class MeetingSession {
 
           function cleanCandidateName(raw: string): string {
             let str = (raw || '').trim();
-            // 1. Strip Google Meet action phrases from pin/unpin or mic/camera controls
             const unpinMatch = str.match(/(?:unpin|pin)\s+(.+?)\s+(?:from|to)\s+your\s+main\s+screen/i);
-            if (unpinMatch && unpinMatch[1]) {
-              str = unpinMatch[1];
-            }
+            if (unpinMatch && unpinMatch[1]) str = unpinMatch[1];
             const micMatch = str.match(/(?:mute|unmute)\s+(.+?)(?:'s|\s+microphone)/i);
-            if (micMatch && micMatch[1]) {
-              str = micMatch[1];
-            }
+            if (micMatch && micMatch[1]) str = micMatch[1];
 
             return str
               .replace(/^(?:unpin|pin)\s+/i, '')
@@ -396,7 +470,6 @@ export class MeetingSession {
             ) {
               return false;
             }
-            // Block lingering action phrases
             if (/^(?:unpin|pin|mute|unmute|turn)\b/i.test(name)) return false;
             if (/\b(?:from your main screen|to your main screen)\b/i.test(name)) return false;
             return true;
@@ -416,94 +489,34 @@ export class MeetingSession {
               'div[data-tid="calling-participant-tile"]',
               'div[data-tid="participant-item"]',
               'div[role="region"]',
+              '.participants-item__display-name',
+              '[data-tid="roster-participant"]',
             ];
 
             for (const sel of tileSelectors) {
               document.querySelectorAll(sel).forEach((tile) => {
-                // Direct tile name element (bottom-left label badge in Google Meet)
                 const nameBadge = tile.querySelector('div[class*="name" i], span[class*="name" i], [data-self-name]');
                 if (nameBadge) {
                   const cleaned = cleanCandidateName(nameBadge.getAttribute('data-self-name') || nameBadge.textContent || '');
                   if (isValidPersonName(cleaned)) foundNames.add(cleaned);
                 }
 
-                const selfName = tile.getAttribute('data-self-name');
-                if (selfName) {
-                  const cleaned = cleanCandidateName(selfName);
-                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
-                }
+                const isSpeaking =
+                  tile.getAttribute('data-is-speaking') === 'true' ||
+                  tile.getAttribute('aria-label')?.includes('speaking') ||
+                  tile.querySelector('[data-is-speaking="true"], [class*="speaking" i], [class*="active-speaker" i]') !== null;
 
-                // Check visible text badges inside tile
-                const badges = tile.querySelectorAll('span, div');
-                for (const badge of Array.from(badges)) {
-                  if (badge.children.length === 0) {
-                    const cleaned = cleanCandidateName(badge.textContent || '');
-                    if (isValidPersonName(cleaned)) {
-                      foundNames.add(cleaned);
-
-                      const isSpeaking = tile.querySelector(
-                        '[data-is-speaking="true"], [aria-label*="speaking" i], [jsname="B7I4Od"], [class*="speaking" i]'
-                      );
-                      if (isSpeaking) {
-                        activeSpeaker = cleaned;
-                      }
-                      break;
-                    }
+                if (isSpeaking) {
+                  const nameBadge = tile.querySelector('div[class*="name" i], span[class*="name" i], [data-self-name]');
+                  if (nameBadge) {
+                    const cleaned = cleanCandidateName(nameBadge.getAttribute('data-self-name') || nameBadge.textContent || '');
+                    if (isValidPersonName(cleaned)) activeSpeaker = cleaned;
                   }
-                }
-
-                // Aria-label fallback only if direct text was not found
-                const aria = tile.getAttribute('aria-label');
-                if (aria) {
-                  const cleaned = cleanCandidateName(aria);
-                  if (isValidPersonName(cleaned)) foundNames.add(cleaned);
                 }
               });
             }
 
-            // 2. Google Meet People Panel rows ([role="listitem"])
-            document.querySelectorAll('[role="listitem"]').forEach((row) => {
-              const rowText = row.textContent || '';
-              if (rowText.toLowerCase().includes(botLower)) return;
-
-              const spans = row.querySelectorAll('span, div');
-              for (const span of Array.from(spans)) {
-                if (span.children.length === 0) {
-                  const cleaned = cleanCandidateName(span.textContent || '');
-                  if (isValidPersonName(cleaned)) {
-                    foundNames.add(cleaned);
-
-                    // Check if unmuted or speaking in the row
-                    const isSpeaking = row.querySelector(
-                      '[data-is-speaking="true"], [aria-label*="speaking" i], [class*="speaking" i]'
-                    );
-                    const isUnmuted = row.querySelector(
-                      '[aria-label*="microphone" i]:not([aria-label*="off" i]):not([aria-label*="muted" i]), [data-is-muted="false"]'
-                    );
-                    if (isSpeaking || isUnmuted) {
-                      activeSpeaker = cleaned;
-                    }
-                    break;
-                  }
-                }
-              }
-            });
-
-            // 3. Search elements with (You) or (Host)
-            document.querySelectorAll('span, div').forEach((el) => {
-              if (el.children.length === 0) {
-                const txt = el.textContent || '';
-                if (txt.includes('(You)') || txt.includes('(Host)')) {
-                  const cleaned = cleanCandidateName(txt);
-                  if (isValidPersonName(cleaned)) {
-                    foundNames.add(cleaned);
-                  }
-                }
-              }
-            });
-
             const namesList = Array.from(foundNames);
-
             if (!activeSpeaker && namesList.length > 0) {
               activeSpeaker = namesList[0];
             }
@@ -513,10 +526,7 @@ export class MeetingSession {
             }
           }
 
-          // Initial scan
           scanAndReportSpeaker();
-
-          // Mutation observer
           const observer = new MutationObserver(() => scanAndReportSpeaker());
           observer.observe(document.body, {
             childList: true,
@@ -524,8 +534,6 @@ export class MeetingSession {
             attributes: true,
             attributeFilter: ['data-is-speaking', 'aria-label', 'class', 'data-self-name'],
           });
-
-          // Periodic scan every 1000ms
           (window as any)[`__timer_${fnName}`] = setInterval(scanAndReportSpeaker, 1000);
         },
         { fnName: bridgeFn, botName: this.botName }
@@ -554,6 +562,11 @@ export class MeetingSession {
     this.isDestroyed = true;
     this.stopMonitoring();
 
+    if (this.maxDurationTimer) {
+      clearTimeout(this.maxDurationTimer);
+      this.maxDurationTimer = null;
+    }
+
     if (this.streamer) {
       this.streamer.close();
       this.streamer = null;
@@ -569,6 +582,7 @@ export class MeetingSession {
       } catch {}
     }
 
+    // 1. Flush and validate WAV recording file BEFORE destroying context
     if (this.audioCaptureSession) {
       try {
         const savedPath = await this.audioCaptureSession.stop();
@@ -595,6 +609,7 @@ export class MeetingSession {
       this.audioCaptureSession = null;
     }
 
+    // 2. Close page cleanly
     try {
       if (this.page && !this.page.isClosed()) {
         await this.page.close().catch(() => {});

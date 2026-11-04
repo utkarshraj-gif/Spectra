@@ -50,3 +50,10 @@ bot-profile/
 .chrome-profile/
 meeting-worker/recordings/
 meeting-worker/bot-profile/
+
+# Verification and test harnesses
+meeting-worker/src/verify-track1.ts
+meeting-worker/src/enterprise-verification.ts
+meeting-worker/src/verify-*.ts
+!meeting-worker/src/audio/verify-audio.ts
+temp-verify-*/

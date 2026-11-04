@@ -114,6 +114,20 @@ func main() {
 					})
 				}
 			}
+		} else if event.Event == "PARTICIPANT_JOINED" || event.Event == "PARTICIPANT_LEFT" {
+			log.Printf("[MeetingSupervisor] %s in %s: %s", event.Event, event.MeetingID, event.Message)
+			meetingService.Broadcast(event.MeetingID, meetings.LiveEvent{
+				Type:      event.Event,
+				MeetingID: event.MeetingID,
+				Payload:   event.Details,
+			})
+		} else if event.Event == "CHAT_MESSAGE" {
+			log.Printf("[MeetingSupervisor] Chat in %s: %s", event.MeetingID, event.Message)
+			meetingService.Broadcast(event.MeetingID, meetings.LiveEvent{
+				Type:      "CHAT_MESSAGE",
+				MeetingID: event.MeetingID,
+				Payload:   event.Details,
+			})
 		} else if (event.Event == "STATE_CHANGE" || event.State == "CALL_ENDED") && event.MeetingID != "" {
 			if event.State == "CALL_ENDED" {
 				go func(mID string) {
