@@ -7,83 +7,99 @@
   }
 </script>
 
-<div class="auth-card">
-  <h2>Login to Spectrum AI</h2>
-  <form on:submit|preventDefault={handleLogin}>
-    <label for="email">Email</label>
-    <input id="email" type="email" bind:value={email} required placeholder="you@company.com" />
+<div class="auth-wrapper">
+  <div class="auth-card card">
+    <h2>Welcome back</h2>
+    <p class="subtitle">Log in to your Spectra account</p>
 
-    <label for="password">Password</label>
-    <input id="password" type="password" bind:value={password} required placeholder="••••••••" />
+    <form on:submit|preventDefault={handleLogin}>
+      <label for="email">Email</label>
+      <input id="email" type="email" bind:value={email} required placeholder="you@company.com" />
 
-    <button type="submit" class="btn">Sign In</button>
-  </form>
-  <p class="footer-link">Don't have an account? <a href="/register">Register</a></p>
+      <label for="password">Password</label>
+      <input id="password" type="password" bind:value={password} required placeholder="••••••••" />
+
+      <button type="submit" class="btn btn-primary full">Sign In</button>
+    </form>
+
+    <p class="footer-link">
+      Don't have an account? <a href="/register">Sign up</a>
+    </p>
+  </div>
 </div>
 
 <style>
+  .auth-wrapper {
+    min-height: calc(100vh - 200px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+  }
+
   .auth-card {
-    max-width: 400px;
-    margin: 3rem auto;
-    background: var(--bg-elevated, #ffffff);
-    color: var(--text, #131316);
+    width: 100%;
+    max-width: 420px;
     padding: 2.5rem;
-    border-radius: 16px;
-    border: 1px solid var(--border, #e2e2e8);
-    box-shadow: var(--card-shadow, 0 4px 24px rgba(0, 0, 0, 0.06));
   }
+
   h2 {
-    margin-top: 0;
-    margin-bottom: 1.5rem;
-    text-align: center;
-    color: var(--text, #131316);
+    margin: 0 0 0.35rem;
+    font-size: 1.75rem;
     font-weight: 700;
+    text-align: center;
   }
+
+  .subtitle {
+    text-align: center;
+    color: var(--text-muted);
+    margin-bottom: 2rem;
+    font-size: 0.95rem;
+  }
+
   label {
     display: block;
     font-size: 0.875rem;
     font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: var(--text, #131316);
+    margin-bottom: 0.4rem;
   }
+
   input {
     width: 100%;
     padding: 0.85rem 1rem;
-    margin-bottom: 1rem;
-    background: var(--bg-muted, #f8fafc);
-    border: 1px solid var(--border, #cbd5e1);
-    border-radius: 8px;
-    color: var(--text, #131316);
+    margin-bottom: 1.1rem;
+    background: var(--bg-muted);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 0.95rem;
     box-sizing: border-box;
     transition: border-color 0.15s;
   }
+
   input:focus {
     outline: none;
-    border-color: #3b82f6;
+    border-color: var(--accent);
   }
-  .btn {
+
+  .full {
     width: 100%;
-    padding: 0.85rem;
-    background: #2563eb;
-    border: none;
-    border-radius: 8px;
-    color: white;
-    font-weight: 600;
-    font-size: 1rem;
-    cursor: pointer;
-    transition: background 0.15s;
+    margin-top: 0.5rem;
   }
-  .btn:hover {
-    background: #1d4ed8;
-  }
+
   .footer-link {
     text-align: center;
-    margin-top: 1.25rem;
-    font-size: 0.875rem;
-    color: var(--text-muted, #6b6b76);
+    margin-top: 1.5rem;
+    font-size: 0.9rem;
+    color: var(--text-muted);
   }
-  a {
-    color: #2563eb;
-    font-weight: 500;
+
+  .footer-link a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .footer-link a:hover {
+    text-decoration: underline;
   }
 </style>

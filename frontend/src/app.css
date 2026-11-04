@@ -1,3 +1,4 @@
+
 :root,
 [data-theme='light'] {
   --bg: #efefef;
@@ -38,6 +39,7 @@ html {
   background: var(--bg);
   color: var(--text);
   transition: background 0.2s, color 0.2s;
+  scroll-behavior: smooth;
 }
 
 body {
