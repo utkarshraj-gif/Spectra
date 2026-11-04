@@ -196,8 +196,12 @@ func (s *Service) CreateAndStartMeeting(ctx context.Context, req *CreateMeetingR
 		return nil, fmt.Errorf("failed to dispatch meeting bot: %w", err)
 	}
 
-	// Worker accepted dispatch -> transition to recording/joined
-	meeting.Status = StatusRecording
+	// Worker accepted dispatch -> transition to recording/joined (or waiting_for_admission if live worker)
+	if _, isMock := s.worker.(*MockWorkerClient); isMock {
+		meeting.Status = StatusRecording
+	} else {
+		meeting.Status = StatusWaitingForAdmission
+	}
 	meeting.UpdatedAt = time.Now().UTC()
 	if err := s.repo.Update(ctx, meeting); err != nil {
 		return nil, fmt.Errorf("failed to update meeting status: %w", err)
@@ -403,4 +407,44 @@ func (s *Service) GetTranscript(ctx context.Context, id string) ([]*TranscriptSe
 	}
 
 	return s.repo.GetTranscript(ctx, id)
+}
+
+// UpdateMeetingStatus updates the status of a meeting and broadcasts the change via SSE.
+func (s *Service) UpdateMeetingStatus(ctx context.Context, id string, newStatus MeetingStatus) (*Meeting, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("meeting id is required")
+	}
+
+	meeting, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("meeting not found: %w", err)
+	}
+
+	if meeting.Status.IsTerminal() && !newStatus.IsTerminal() {
+		return meeting, nil
+	}
+
+	meeting.Status = newStatus
+	now := time.Now().UTC()
+	meeting.UpdatedAt = now
+
+	if newStatus == StatusRecording && meeting.StartedAt == nil {
+		meeting.StartedAt = &now
+	}
+	if newStatus.IsTerminal() && meeting.EndedAt == nil {
+		meeting.EndedAt = &now
+	}
+
+	if err := s.repo.Update(ctx, meeting); err != nil {
+		return nil, fmt.Errorf("failed to update meeting status: %w", err)
+	}
+
+	s.Broadcast(meeting.ID, LiveEvent{
+		Type:      "STATE_CHANGE",
+		MeetingID: meeting.ID,
+		Payload:   meeting.ToResponse(),
+	})
+
+	return meeting, nil
 }

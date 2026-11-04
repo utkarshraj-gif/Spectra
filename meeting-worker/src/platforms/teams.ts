@@ -110,14 +110,8 @@ export class TeamsAdapter implements PlatformAdapter {
           console.log(`[TeamsAdapter] Submitting join request via ${sel}`);
           await btn.click({ force: true, timeout: 3000 }).catch(() => {});
 
-          // Fallback DOM dispatch and Enter press
-          await page.evaluate(() => {
-            const el = Array.from(document.querySelectorAll('button')).find(
-              b => b.innerText.includes('Join now') || b.getAttribute('data-tid') === 'prejoin-join-button'
-            );
-            el?.click();
-          }).catch(() => {});
-          await page.keyboard.press('Enter').catch(() => {});
+          // Single click only: In Teams light-meetings, focus immediately shifts to Cancel.
+          // Pressing Enter or double-clicking clicks Cancel and aborts with CallEndReasonLocalUserInitiated (12).
           return;
         }
       }
@@ -153,6 +147,17 @@ export class TeamsAdapter implements PlatformAdapter {
         if (await page.locator(sel).first().isVisible({ timeout: 100 }).catch(() => false)) {
           console.log(`[TeamsAdapter] Admitted into Microsoft Teams call (detected via ${sel})`);
           onStateChange('IN_MEETING', 'Admitted to Microsoft Teams meeting');
+
+          // Immediately mute camera and microphone in-meeting so Teams shows the avatar circle (initials) instead of green video
+          try {
+            await page.keyboard.press('Control+Shift+O').catch(() => {});
+            await page.keyboard.press('Control+Shift+M').catch(() => {});
+            const camBtn = page.locator('button[data-tid="call-control-video"], button[aria-label*="camera" i], button:has-text("Camera")').first();
+            if (await camBtn.isVisible({ timeout: 800 }).catch(() => false)) {
+              await camBtn.click().catch(() => {});
+            }
+          } catch {}
+
           return true;
         }
       }
@@ -434,6 +439,7 @@ export class TeamsAdapter implements PlatformAdapter {
 
   private async ensureCameraOff(page: Page): Promise<void> {
     try {
+      await page.keyboard.press('Control+Shift+O').catch(() => {});
       // Check camera switches / checkboxes
       await page
         .evaluate(() => {
