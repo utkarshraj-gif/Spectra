@@ -96,18 +96,12 @@ export class GoogleMeetAdapter implements PlatformAdapter {
 
   normalizeUrl(rawUrl: string): string {
     let cleaned = rawUrl.trim();
+    const codeMatch = cleaned.match(/([a-z]{3}-[a-z]{4}-[a-z]{3})/i);
+    if (codeMatch) {
+      return `https://meet.google.com/${codeMatch[1].toLowerCase()}?hl=en`;
+    }
     if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
       cleaned = 'https://' + cleaned;
-    }
-    try {
-      const parsed = new URL(cleaned);
-      const segments = parsed.pathname.split('/').filter(Boolean);
-      const code = segments[segments.length - 1] || '';
-      if (code) {
-        return `https://meet.google.com/${code}?hl=en`;
-      }
-    } catch {
-      // fallback
     }
     return cleaned.includes('?') ? `${cleaned}&hl=en` : `${cleaned}?hl=en`;
   }
@@ -144,7 +138,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
   }
 
   async submitJoinRequest(page: Page, botName = 'Spectra'): Promise<void> {
-    // Fast check if already admitted
+    // 1. Fast check if already admitted
     const inMeeting = await page
       .locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [data-participant-id]')
       .first()
@@ -152,42 +146,78 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       .catch(() => false);
     if (inMeeting) return;
 
-    // Check if name input needs filling before clicking join CTA
+    // 2. Dismiss media warning modal if present ("Continue without microphone and camera")
+    try {
+      const modalBtn = page.locator('button:has-text("Continue without"), [role="button"]:has-text("Continue without")').first();
+      if (await modalBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+        await modalBtn.click().catch(() => {});
+        await page.waitForTimeout(300);
+      }
+    } catch {}
+
+    // 3. Check for immediate meeting restriction / ejection screen
+    const bodyText = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+    if (/you can't join this (video )?call|no one can join a meeting unless invited|this meeting has already ended/i.test(bodyText)) {
+      throw new Error(
+        "Google Meet rejected join request: Meeting access is restricted ('You can't join this video call'). The meeting host must set Meeting Access to 'Open' in Google Meet Host Controls, or the bot must be signed into an authorized Google account."
+      );
+    }
+
+    // 4. Check if name input needs filling before clicking join CTA
     const nameInput = page
       .locator('input[aria-label*="name" i], input[type="text"]:not([aria-hidden="true"])')
       .first();
-    if (await nameInput.isVisible({ timeout: 500 }).catch(() => false)) {
+    if (await nameInput.isVisible({ timeout: 1000 }).catch(() => false)) {
       const val = await nameInput.inputValue().catch(() => '');
       if (!val || val.trim().length === 0) {
         await nameInput.fill(botName);
         await page.keyboard.press('Enter').catch(() => {});
+        await page.waitForTimeout(300);
       }
     }
 
-    // Unified reactive locator resolving immediately the moment ANY valid CTA appears
+    // 5. Try finding and clicking visible CTA button
+    const JOIN_SELECTORS = [
+      'button:has-text("Ask to join")',
+      'button:has-text("Join now")',
+      'button:has-text("Rejoin")',
+      'button:has-text("Switch here")',
+      'button:has-text("Join")',
+    ];
+
+    for (const sel of JOIN_SELECTORS) {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 600 }).catch(() => false)) {
+        const isDisabled = await btn.evaluate((el: HTMLElement) => {
+          const b = el as HTMLButtonElement;
+          return b.disabled || b.getAttribute('aria-disabled') === 'true';
+        }).catch(() => false);
+
+        if (isDisabled && (await nameInput.isVisible().catch(() => false))) {
+          await nameInput.fill(botName);
+          await page.waitForTimeout(200);
+        }
+
+        await ensureMicrophoneMuted(page).catch(() => {});
+        await btn.click({ timeout: 3000 }).catch(() => {});
+        return;
+      }
+    }
+
+    // 6. Check again if blocked screen appeared after attempt
+    const postBodyText = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+    if (/you can't join this (video )?call|no one can join a meeting unless invited|this meeting has already ended/i.test(postBodyText)) {
+      throw new Error(
+        "Google Meet rejected join request: Meeting access is restricted ('You can't join this video call'). The meeting host must set Meeting Access to 'Open' in Google Meet Host Controls, or the bot must be signed into an authorized Google account."
+      );
+    }
+
+    // 7. Fallback: wait up to 5s for any CTA to become visible
     const primaryCta = page
-      .locator(
-        'button:has-text("Ask to join"), button:has-text("Join now"), button:has-text("Rejoin"), button:has-text("Switch here"), button:has-text("Join")'
-      )
+      .locator('button:has-text("Ask to join"), button:has-text("Join now"), button:has-text("Rejoin"), button:has-text("Join")')
       .first();
-
-    await primaryCta.waitFor({ state: 'visible', timeout: 15000 });
-
-    const isDisabled = await primaryCta.evaluate((el: HTMLElement) => {
-      const btn = el as HTMLButtonElement;
-      return btn.disabled || btn.getAttribute('aria-disabled') === 'true';
-    }).catch(() => false);
-
-    if (isDisabled) {
-      if (await nameInput.isVisible().catch(() => false)) {
-        await nameInput.fill(botName);
-        await page.waitForTimeout(200);
-      }
-    }
-
-    // Ensure microphone is definitely muted immediately prior to clicking Join
+    await primaryCta.waitFor({ state: 'visible', timeout: 5000 });
     await ensureMicrophoneMuted(page).catch(() => {});
-
     await primaryCta.click({ timeout: 2000 });
   }
 

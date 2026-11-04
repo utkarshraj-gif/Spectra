@@ -1,3 +1,4 @@
+import path from 'path';
 import { createMeetingContext } from './browser.js';
 
 async function loginProvision() {
@@ -18,15 +19,20 @@ async function loginProvision() {
   await page.goto('https://accounts.google.com/ServiceLogin?service=mail&continue=https://meet.google.com');
 
   console.log('\n>>> ACTION REQUIRED:');
-  console.log('1. Apne browser window me kisi bhi Google account se login kar lijiye.');
-  console.log('2. Login complete hone ke baad browser window band kar dijiye.');
-  console.log('3. Session cookies `./bot-profile` me permanently save ho jayengi!\n');
+  console.log('1. Log into your Google account in the opened Chrome browser window.');
+  console.log('2. Once logged in, close the browser window.');
+  console.log('3. Session state and cookies will be saved to `./bot-profile/storage.json`!\n');
 
   page.on('close', async () => {
-    console.log('[Login Provisioner] Browser closed. Google session saved successfully!');
+    console.log('[Login Provisioner] Browser closed. Capturing Google session state...');
     try {
+      const storagePath = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile', 'storage.json');
+      await context.storageState({ path: storagePath });
+      console.log(`[Login Provisioner] Google session successfully saved to ${storagePath}!`);
       await context.close();
-    } catch {}
+    } catch (err) {
+      console.warn('[Login Provisioner] Warning saving storage state:', err);
+    }
     process.exit(0);
   });
 }

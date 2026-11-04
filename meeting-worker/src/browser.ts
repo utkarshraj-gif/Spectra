@@ -62,6 +62,23 @@ export async function createMeetingContext(
   options?: CreateMeetingContextOptions
 ): Promise<{ context: BrowserContext; profileDir: string }> {
   const isHeadless = options?.headless !== undefined ? options.headless : config.headless;
+  const baseProfileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
+  const storagePath = path.join(baseProfileDir, 'storage.json');
+
+  // Interactive login session: uses persistent context for permanent Google credentials capture
+  if (meetingId === 'login-session') {
+    if (!fs.existsSync(baseProfileDir)) {
+      fs.mkdirSync(baseProfileDir, { recursive: true });
+    }
+    const context = await chromium.launchPersistentContext(baseProfileDir, {
+      headless: isHeadless,
+      args: [...SPECTRA_JOIN_BROWSER_ARGS],
+      channel: 'chrome',
+      viewport: { width: 1280, height: 720 },
+      locale: 'en-US',
+    });
+    return { context, profileDir: baseProfileDir };
+  }
 
   if (!sharedBrowser || !sharedBrowser.isConnected()) {
     const baseOptions = {
@@ -76,12 +93,19 @@ export async function createMeetingContext(
     }
   }
 
-  // Create isolated, in-memory browser context per meeting session to eliminate cross-meeting state bleed
-  const context: BrowserContext = await sharedBrowser.newContext({
+  const contextOptions: any = {
     permissions: ['microphone', 'camera'],
     viewport: { width: 1280, height: 720 },
     locale: 'en-US',
-  });
+  };
+
+  // If saved Google account session state exists in bot-profile, attach it to authenticate bot
+  if (fs.existsSync(storagePath)) {
+    contextOptions.storageState = storagePath;
+  }
+
+  // Create isolated, in-memory browser context per meeting session to eliminate cross-meeting state bleed
+  const context: BrowserContext = await sharedBrowser.newContext(contextOptions);
 
   // Ensure bot never exposes synthetic green test video to meetings
   await context.addInitScript(() => {
