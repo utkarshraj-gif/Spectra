@@ -2,8 +2,22 @@
   import { theme } from '$lib/stores/theme';
   import { Sun, Moon, Sparkles } from 'lucide-svelte';
   import { onMount } from 'svelte';
+  import { page } from '$app/stores';
 
   onMount(() => theme.init());
+
+  function scrollTo(id: string) {
+    // If we are not on the home page, go home first with the hash
+    if ($page.url.pathname !== '/') {
+      window.location.href = `/#${id}`;
+      return;
+    }
+
+    const el = document.getElementById(id);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
 </script>
 
 <header class="nav">
@@ -14,9 +28,9 @@
     </a>
 
     <nav class="links">
-      <a href="/#how">How It Works</a>
-      <a href="/#pricing">Pricing</a>
-      <a href="/#faq">FAQ</a>
+      <button type="button" class="nav-link" on:click={() => scrollTo('how')}>How It Works</button>
+      <button type="button" class="nav-link" on:click={() => scrollTo('pricing')}>Pricing</button>
+      <button type="button" class="nav-link" on:click={() => scrollTo('faq')}>FAQ</button>
     </nav>
 
     <div class="actions">
@@ -42,12 +56,14 @@
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
   }
+
   .nav-inner {
     display: flex;
     align-items: center;
     justify-content: space-between;
     height: 64px;
   }
+
   .logo {
     display: flex;
     align-items: center;
@@ -55,23 +71,35 @@
     font-weight: 700;
     font-size: 1.25rem;
   }
+
   .links {
     display: flex;
-    gap: 2rem;
+    gap: 0.5rem;
   }
-  .links a {
+
+  .nav-link {
+    background: none;
+    border: none;
     font-size: 0.95rem;
     color: var(--text-muted);
     font-weight: 500;
+    cursor: pointer;
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
   }
-  .links a:hover {
+
+  .nav-link:hover {
     color: var(--text);
+    background: var(--bg-muted);
   }
+
   .actions {
     display: flex;
     align-items: center;
     gap: 0.75rem;
   }
+
   .theme-btn {
     background: transparent;
     border: 1px solid var(--border);
@@ -83,7 +111,10 @@
     justify-content: center;
     color: var(--text);
   }
+
   @media (max-width: 768px) {
-    .links { display: none; }
+    .links {
+      display: none;
+    }
   }
 </style>

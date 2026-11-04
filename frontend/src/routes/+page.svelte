@@ -140,6 +140,26 @@
   </div>
 </section>
 
+<section id="faq" class="section">
+  <div class="container">
+    <h2>Frequently Asked Questions</h2>
+    <div class="faq-list">
+      <div class="card faq-item">
+        <h3>Is my meeting data private?</h3>
+        <p>Yes. Audio is processed locally and you control retention.</p>
+      </div>
+      <div class="card faq-item">
+        <h3>Does the bot need host permission?</h3>
+        <p>Yes. Spectra never bypasses waiting rooms or admission controls.</p>
+      </div>
+      <div class="card faq-item">
+        <h3>Which platforms are supported?</h3>
+        <p>Google Meet is the primary focus for the first release.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <style>
   .hero {
     padding: 6rem 0 4rem;
@@ -313,6 +333,28 @@
     padding: 0.35rem 0;
     font-size: 0.95rem;
   }
+
+  .faq-list {
+  display: grid;
+  gap: 1rem;
+  max-width: 720px;
+  margin: 2.5rem auto 0;
+}
+
+.faq-item {
+  padding: 1.5rem;
+}
+
+.faq-item h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.faq-item p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
 
   @media (max-width: 768px) {
     .steps, .usecases, .pricing, .demo-body {
