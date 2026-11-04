@@ -13,6 +13,31 @@ function broadcastEvent(meetingId: string, event: SessionStatusEvent) {
   if (event.state === 'CALL_ENDED' || event.state === 'FAILED') {
     sessions.delete(meetingId);
   }
+
+  // Notify Spectra Go backend of state transitions
+  const backendStateMap: Record<string, string> = {
+    IN_MEETING: 'recording',
+    WAITING_FOR_ADMISSION: 'waiting_for_admission',
+    CALL_ENDED: 'completed',
+    FAILED: 'failed',
+    ADMISSION_DENIED: 'failed',
+  };
+  const targetStatus = backendStateMap[event.state];
+  if (targetStatus) {
+    const payload = JSON.stringify({ status: targetStatus });
+    fetch(`http://127.0.0.1:8080/api/meetings/${meetingId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    }).catch(() => {
+      fetch(`http://127.0.0.1:8080/api/v1/meetings/${meetingId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      }).catch(() => {});
+    });
+  }
+
   const listeners = eventListeners.get(meetingId);
   if (listeners) {
     for (const listener of listeners) {

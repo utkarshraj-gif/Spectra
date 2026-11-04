@@ -3,7 +3,7 @@ import { createMeetingContext, cleanupProfileDir } from './browser.js';
 import { config } from './config.js';
 import { MeetingState, SessionStatusEvent, PlatformAdapter } from './types.js';
 import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile, LiveAudioStreamer } from './audio/index.js';
-import { getAdapterForUrl, ensureMicrophoneMuted } from './platforms/index.js';
+import { getAdapterForUrl, ensureMicrophoneMuted, ensureCameraMuted } from './platforms/index.js';
 
 export class MeetingSession {
   public readonly meetingId: string;
@@ -122,8 +122,9 @@ export class MeetingSession {
         // 1. Immediately start audio capture for 0ms initial recording latency
         await this.startAudioCapture();
 
-        // 2. Enforce muted microphone immediately upon entering meeting room
+        // 2. Enforce muted microphone and camera immediately upon entering meeting room
         await ensureMicrophoneMuted(this.page).catch(() => {});
+        await ensureCameraMuted(this.page).catch(() => {});
 
         // 3. Start in-meeting monitor and speaker observer
         this.startInMeetingMonitor();
@@ -196,31 +197,14 @@ export class MeetingSession {
       }
 
       try {
-        // 1. Check for explicit meeting termination / ejection screens across Google Meet, Zoom, Teams
-        const ENDED_SELECTORS = [
-          'text=/You left the meeting/i',
-          'text=/The call has ended/i',
-          'text=/Meeting ended/i',
-          'text=/Your call was ended/i',
-          'text=/ended the meeting for everyone/i',
-          'text=/The meeting has ended for everyone/i',
-          'text=/removed from the meeting/i',
-          'text=/The host has ended this meeting/i',
-          'text=/You have been removed by the host/i',
-          'text=/Meeting ended by host/i',
-          'text=/You\'ve been kicked out/i',
-          'text=/Return to home screen/i',
-          'text=/You can\'t join this video call/i',
-          'text=/This meeting has already ended/i',
-          'button:has-text("Return to home screen")',
-        ];
+        // 1. Fast, comprehensive check for meeting termination / ejection / removal screens across Google Meet, Zoom, Teams
+        const bodyText = await this.page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+        const isEjectedOrEnded = /removed from the (meeting|call)|someone removed you|you were removed|you['’]?ve been removed|you have been removed|kicked out|call (has )?ended|meeting (has )?ended|ended the meeting for everyone|host ended|host has ended|returning to teams meetings|enjoy your call|did you leave by mistake|you can['’]?t join this video call|you left the meeting|return to home screen/i.test(bodyText);
 
-        for (const sel of ENDED_SELECTORS) {
-          if (await this.page.locator(sel).first().isVisible({ timeout: 100 }).catch(() => false)) {
-            this.transitionTo('CALL_ENDED', 'Meeting ended by host or bot ejected');
-            await this.cleanup();
-            return;
-          }
+        if (isEjectedOrEnded) {
+          console.log(`[MeetingSession] Bot was removed or call ended: ${this.meetingId}. Auto-leaving immediately.`);
+          await this.leave('Bot removed from meeting or call ended by host');
+          return;
         }
 
         // 2. Ensure bot's own microphone remains muted
@@ -292,20 +276,21 @@ export class MeetingSession {
           return tiles.length;
         }, this.botName).catch(() => -1);
 
-        // 4. Intelligent "Lone Bot" Auto-Departure (Task G-3)
-        // If human participants were confirmed, and bot is left alone for > 90 seconds
+        // 4. Intelligent "Lone Bot" Auto-Departure: leave when alone or when others have left
+        const isAloneText = /waiting for (others|other people) to join|invite people to join you|only one here|in this meeting \(1\)/i.test(bodyText);
+        const isAlone = isAloneText || (participantCount === 1) || (hadHumanParticipants && participantCount <= 1);
+
         if (participantCount > 1) {
           hadHumanParticipants = true;
           loneBotStartTime = null;
-        } else if (participantCount === 1) {
-          if (hadHumanParticipants && Date.now() - joinedAt > 15000) {
-            if (loneBotStartTime === null) {
-              loneBotStartTime = Date.now();
-            } else if (Date.now() - loneBotStartTime >= config.loneBotTimeoutMs) {
-              console.log(`[MeetingSession] Lone bot departure: sole participant for >${config.loneBotTimeoutMs / 1000}s in ${this.meetingId}. Auto-leaving.`);
-              await this.leave('Lone bot departure: no other participants present for >90s');
-              return;
-            }
+        } else if (isAlone) {
+          if (loneBotStartTime === null) {
+            loneBotStartTime = Date.now();
+            console.log(`[MeetingSession] Bot is alone in call ${this.meetingId}. Starting lone-bot departure countdown (${config.loneBotTimeoutMs / 1000}s).`);
+          } else if (Date.now() - loneBotStartTime >= config.loneBotTimeoutMs) {
+            console.log(`[MeetingSession] Lone bot departure: sole participant for >${config.loneBotTimeoutMs / 1000}s in ${this.meetingId}. Auto-leaving.`);
+            await this.leave('Lone bot departure: all other participants have left the meeting');
+            return;
           }
         }
 
@@ -354,7 +339,7 @@ export class MeetingSession {
   private async startAudioCapture(): Promise<void> {
     if (!this.page || this.audioCaptureSession) return;
     try {
-      const wsUrl = `${config.aiServiceWsUrl}?meeting_id=${this.meetingId}`;
+      const wsUrl = `${config.aiServiceWsUrl}/ws/transcribe/${this.meetingId}`;
 
       this.streamer = new LiveAudioStreamer({
         aiServiceWsUrl: wsUrl,

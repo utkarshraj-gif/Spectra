@@ -50,6 +50,8 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	rg.GET("/meetings/:id/transcript", h.GetTranscript)
 	rg.POST("/meetings/:id/segments", h.AddSegment)
 	rg.GET("/meetings/:id/live", h.LiveStream)
+	rg.POST("/meetings/:id/status", h.UpdateStatus)
+	rg.PATCH("/meetings/:id/status", h.UpdateStatus)
 }
 
 // Create handles POST /api/meetings: creates a meeting record and dispatches the bot.
@@ -211,4 +213,24 @@ func (h *Handler) LiveStream(c *gin.Context) {
 			c.Writer.Flush()
 		}
 	}
+}
+
+// UpdateStatus handles POST/PATCH /api/meetings/:id/status: updates meeting status from worker events.
+func (h *Handler) UpdateStatus(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		Status MeetingStatus `json:"status" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "INVALID_REQUEST_BODY", "status is required", err.Error())
+		return
+	}
+
+	meeting, err := h.service.UpdateMeetingStatus(c.Request.Context(), id, req.Status)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "UPDATE_FAILED", err.Error())
+		return
+	}
+
+	api.RespondJSON(c, http.StatusOK, meeting.ToResponse())
 }

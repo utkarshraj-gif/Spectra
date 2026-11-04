@@ -86,8 +86,6 @@ export async function createMeetingContext(
   // Ensure bot never exposes synthetic green test video to meetings
   await context.addInitScript(() => {
     try {
-      // Do not mutate media stream contracts for Microsoft Teams calling agents
-      if (window.location.hostname.includes('teams')) return;
 
       if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         const origEnumerate = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);

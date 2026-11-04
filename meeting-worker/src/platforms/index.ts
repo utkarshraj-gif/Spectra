@@ -57,16 +57,19 @@ export async function ensureCameraMuted(page: Page): Promise<boolean> {
     const camSelectors = [
       'button[aria-label*="Turn off camera" i]',
       'div[role="button"][aria-label*="Turn off camera" i]',
-      'button[aria-label*="camera" i]',
+      'button[aria-label*="camera" i]:not([aria-label*="Turn on camera" i])',
+      'button:has-text("Camera")',
+      'button[data-tid="call-control-video"]',
       'div[role="button"][aria-label*="camera" i]',
       '[data-is-muted="false"][aria-label*="camera" i]',
     ];
 
     for (const sel of camSelectors) {
       const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      if (await btn.isVisible({ timeout: 800 }).catch(() => false)) {
         const aria = (await btn.getAttribute('aria-label').catch(() => '')) || '';
-        if (/turn off/i.test(aria)) {
+        const checked = await btn.getAttribute('aria-checked').catch(() => '');
+        if (/turn off/i.test(aria) || checked === 'true' || /camera/i.test(aria)) {
           console.log(`[Platform] Turning off camera via ${sel} (${aria})`);
           await btn.click().catch(() => {});
           await page.waitForTimeout(200);
@@ -74,6 +77,10 @@ export async function ensureCameraMuted(page: Page): Promise<boolean> {
         }
       }
     }
+
+    // Teams shortcut Control+Shift+O, Meet shortcut Control+e
+    await page.keyboard.press('Control+Shift+O').catch(() => {});
+    await page.keyboard.press('Control+e').catch(() => {});
   } catch (err) {
     console.warn('[Platform] Error ensuring camera muted:', err);
   }

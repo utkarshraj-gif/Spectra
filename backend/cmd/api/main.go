@@ -153,26 +153,52 @@ func main() {
 	})
 
 	workerMgr.OnStateChange(func(meetingID string, state worker.State, message string) {
-		if state == worker.StateCallEnded && meetingID != "" {
-			go func(mID string) {
-				log.Printf("[MeetingSupervisor] StateListener CALL_ENDED for %s. Finalizing meeting to completed...", mID)
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				m, err := meetingRepo.GetByID(ctx, mID)
-				if err == nil && !m.Status.IsTerminal() {
-					now := time.Now().UTC()
-					m.Status = meetings.StatusCompleted
-					m.EndedAt = &now
-					m.UpdatedAt = now
-					_ = meetingRepo.Update(ctx, m)
-					meetingService.Broadcast(m.ID, meetings.LiveEvent{
-						Type:      "STATE_CHANGE",
-						MeetingID: m.ID,
-						Payload:   m.ToResponse(),
-					})
-				}
-			}(meetingID)
+		if meetingID == "" {
+			return
 		}
+		go func(mID string, st worker.State) {
+			var target meetings.MeetingStatus
+			switch st {
+			case worker.StateInMeeting:
+				target = meetings.StatusRecording
+			case worker.StateWaitingForAdmission:
+				target = meetings.StatusWaitingForAdmission
+			case worker.StateCallEnded:
+				target = meetings.StatusCompleted
+			case worker.StateFailed, worker.StateAdmissionDenied:
+				target = meetings.StatusFailed
+			default:
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			m, err := meetingRepo.GetByID(ctx, mID)
+			if err != nil {
+				return
+			}
+
+			if m.Status == target || (m.Status.IsTerminal() && !target.IsTerminal()) {
+				return
+			}
+
+			now := time.Now().UTC()
+			m.Status = target
+			m.UpdatedAt = now
+			if target == meetings.StatusRecording && m.StartedAt == nil {
+				m.StartedAt = &now
+			}
+			if target.IsTerminal() && m.EndedAt == nil {
+				m.EndedAt = &now
+			}
+			_ = meetingRepo.Update(ctx, m)
+			meetingService.Broadcast(m.ID, meetings.LiveEvent{
+				Type:      "STATE_CHANGE",
+				MeetingID: m.ID,
+				Payload:   m.ToResponse(),
+			})
+			log.Printf("[MeetingSupervisor] StateListener %s for %s. Meeting status updated to %s", st, mID, target)
+		}(meetingID, state)
 	})
 
 	// 8. Initialize Google OAuth and Calendar services
