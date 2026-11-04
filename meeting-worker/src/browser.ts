@@ -65,21 +65,6 @@ export async function createMeetingContext(
   const baseProfileDir = path.resolve(process.env.BOT_PROFILE_DIR || './bot-profile');
   const storagePath = path.join(baseProfileDir, 'storage.json');
 
-  // Interactive login session: uses persistent context for permanent Google credentials capture
-  if (meetingId === 'login-session') {
-    if (!fs.existsSync(baseProfileDir)) {
-      fs.mkdirSync(baseProfileDir, { recursive: true });
-    }
-    const context = await chromium.launchPersistentContext(baseProfileDir, {
-      headless: isHeadless,
-      args: [...SPECTRA_JOIN_BROWSER_ARGS],
-      channel: 'chrome',
-      viewport: { width: 1280, height: 720 },
-      locale: 'en-US',
-    });
-    return { context, profileDir: baseProfileDir };
-  }
-
   if (!sharedBrowser || !sharedBrowser.isConnected()) {
     const baseOptions = {
       headless: isHeadless,
