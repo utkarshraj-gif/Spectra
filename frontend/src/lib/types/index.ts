@@ -111,3 +111,13 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   transcription_language: 'en',
   notify_on_complete: true
 };
+
+export type MeetingPlatform = 'google_meet' | 'zoom' | 'teams' | 'unknown' | string;
+
+export interface MeetingFiltersState {
+  query: string;
+  platform: 'all' | 'google_meet' | 'zoom' | 'teams';
+  status: 'all' | MeetingStatus;
+  dateFrom: string; // YYYY-MM-DD or ''
+  dateTo: string;
+}

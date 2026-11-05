@@ -22,6 +22,7 @@
   import SummaryViewer from '$lib/components/SummaryViewer.svelte';
   import ActionItemsViewer from '$lib/components/ActionItemsViewer.svelte';
   import ParticipantsViewer from '$lib/components/ParticipantsViewer.svelte';
+  import ExportMenu from '$lib/components/ExportMenu.svelte';
 
   let meeting: Meeting | null = null;
   let segments: TranscriptSegment[] = [];
@@ -160,6 +161,12 @@
     {/if}
 
     <div class="actions">
+      <ExportMenu
+        {meeting}
+        {summary}
+        {actionItems}
+        {segments}
+      />
       {#if !['completed', 'failed', 'cancelled'].includes(meeting.status)}
         <button class="btn danger" on:click={handleStop} disabled={stopping}>
           {stopping ? 'Stopping…' : 'Stop Bot'}

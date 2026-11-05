@@ -1,11 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { listMeetings, listCalendarEvents, joinCalendarEvent } from '$lib/api/client';
-  import type { Meeting, CalendarEvent, CalendarSyncState } from '$lib/types';
+  import {
+    listMeetings,
+    listCalendarEvents,
+    joinCalendarEvent,
+    getTranscript
+  } from '$lib/api/client';
+  import type {
+    Meeting,
+    CalendarEvent,
+    CalendarSyncState,
+    MeetingFiltersState
+  } from '$lib/types';
   import MeetingCard from '$lib/components/MeetingCard.svelte';
   import CalendarEventCard from '$lib/components/CalendarEventCard.svelte';
   import CalendarSyncStatus from '$lib/components/CalendarSyncStatus.svelte';
+  import MeetingFilters from '$lib/components/MeetingFilters.svelte';
+  import { filterMeetings, buildTranscriptIndex } from '$lib/utils/searchMeetings';
 
   let meetings: Meeting[] = [];
   let events: CalendarEvent[] = [];
@@ -16,9 +28,24 @@
   let calendarMessage = '';
   let joiningId: string | null = null;
   let joinError = '';
+  let transcriptIndex: Record<string, string> = {};
+  let indexing = false;
+
+  let filters: MeetingFiltersState = {
+    query: '',
+    platform: 'all',
+    status: 'all',
+    dateFrom: '',
+    dateTo: ''
+  };
+
+  $: filtered = filterMeetings(meetings, filters, transcriptIndex);
+
+  function handleFiltersChange(f: MeetingFiltersState) {
+  filters = f;
+  }
 
   onMount(async () => {
-    // Meetings
     try {
       meetings = await listMeetings();
     } catch (e: any) {
@@ -26,8 +53,22 @@
     } finally {
       loadingMeetings = false;
     }
+  
+    
+    // Optional: index a few recent completed meetings for transcript search
+    indexing = true;
+    const toIndex = meetings.filter((m) => m.status === 'completed').slice(0, 15);
+    for (const m of toIndex) {
+      try {
+        const segs = await getTranscript(m.id);
+        transcriptIndex[m.id] = buildTranscriptIndex(m.id, segs);
+      } catch {
+        /* skip */
+      }
+    }
+    transcriptIndex = { ...transcriptIndex };
+    indexing = false;
 
-    // Calendar
     try {
       const result = await listCalendarEvents();
       if (result.ok) {
@@ -50,18 +91,14 @@
     joiningId = event.id;
     try {
       const res = await joinCalendarEvent(event.id);
-      // Prefer redirect to the created meeting if backend returns an id
       const meetingId = res.meeting_id || res.id;
       if (meetingId) {
         goto(`/meetings/${meetingId}`);
         return;
       }
-      // Otherwise mark as has_bot locally
-      events = events.map((e) =>
-        e.id === event.id ? { ...e, has_bot: true } : e
-      );
+      events = events.map((e) => (e.id === event.id ? { ...e, has_bot: true } : e));
     } catch (e: any) {
-      joinError = e.message || 'Failed to start bot for this event';
+      joinError = e.message || 'Failed to start bot';
     } finally {
       joiningId = null;
     }
@@ -74,52 +111,45 @@
     <a href="/meetings/new" class="btn btn-primary">+ New Meeting</a>
   </div>
 
-  <!-- Calendar section -->
   <section class="section">
     <h2>Upcoming Calendar Events</h2>
-
     <CalendarSyncStatus state={loadingCalendar ? 'loading' : calendarState} message={calendarMessage} />
-
-    {#if joinError}
-      <div class="error">{joinError}</div>
-    {/if}
-
+    {#if joinError}<div class="error">{joinError}</div>{/if}
     {#if loadingCalendar}
       <p class="muted">Loading calendar…</p>
     {:else if calendarState === 'connected' && events.length === 0}
-      <div class="empty card">
-        <p>No upcoming events with Meet links.</p>
-      </div>
+      <div class="empty card"><p>No upcoming events with Meet links.</p></div>
     {:else if calendarState === 'connected'}
-      <div class="event-list">
-        {#each events as event}
-          <CalendarEventCard
-            {event}
-            joining={joiningId === event.id}
-            onJoin={handleJoin}
-          />
-        {/each}
-      </div>
+      {#each events as event}
+        <CalendarEventCard {event} joining={joiningId === event.id} onJoin={handleJoin} />
+      {/each}
     {/if}
   </section>
 
-  <!-- Recent meetings -->
   <section class="section">
-    <h2>Recent Meetings</h2>
+    <div class="section-head">
+      <h2>Recent Meetings</h2>
+      {#if indexing}<span class="muted small">Indexing transcripts for search…</span>{/if}
+    </div>
+
+    <MeetingFilters {filters} onChange={handleFiltersChange} />
 
     {#if loadingMeetings}
       <p class="muted">Loading meetings…</p>
     {:else if meetingsError}
       <div class="error">{meetingsError}</div>
-    {:else if meetings.length === 0}
+    {:else if filtered.length === 0}
       <div class="empty card">
-        <p>No meetings yet.</p>
-        <a href="/meetings/new" class="btn btn-primary">Start your first meeting</a>
+        <p>{meetings.length === 0 ? 'No meetings yet.' : 'No meetings match your filters.'}</p>
+        {#if meetings.length === 0}
+          <a href="/meetings/new" class="btn btn-primary">Start your first meeting</a>
+        {/if}
       </div>
     {:else}
+      <p class="muted count">{filtered.length} result{filtered.length === 1 ? '' : 's'}</p>
       <div class="card-list">
-        {#each meetings as meeting}
-          <MeetingCard {meeting} />
+        {#each filtered as meeting}
+          <MeetingCard {meeting} highlightQuery={filters.query} />
         {/each}
       </div>
     {/if}
@@ -127,10 +157,7 @@
 </div>
 
 <style>
-  .dashboard {
-    max-width: 900px;
-    margin: 0 auto;
-  }
+  .dashboard { max-width: 900px; margin: 0 auto; }
   .header {
     display: flex;
     justify-content: space-between;
@@ -138,38 +165,26 @@
     margin-bottom: 2rem;
     gap: 1rem;
   }
-  h1 {
-    margin: 0;
-    font-size: 1.75rem;
+  h1 { margin: 0; font-size: 1.75rem; }
+  .section { margin-bottom: 2.5rem; }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
   }
-  .section {
-    margin-bottom: 2.5rem;
-  }
-  h2 {
-    margin: 0 0 1rem;
-    font-size: 1.15rem;
-  }
-  .muted {
-    color: var(--text-muted);
-  }
+  h2 { margin: 0; font-size: 1.15rem; }
+  .muted { color: var(--text-muted); }
+  .small { font-size: 0.8rem; }
+  .count { margin: 0 0 0.75rem; font-size: 0.85rem; }
   .error {
     background: #7f1d1d;
     color: #fca5a5;
     padding: 0.85rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
-    font-size: 0.9rem;
   }
-  .empty {
-    padding: 2rem;
-    text-align: center;
-    color: var(--text-muted);
-  }
-  .empty .btn {
-    margin-top: 1rem;
-  }
-  .card-list {
-    display: flex;
-    flex-direction: column;
-  }
+  .empty { padding: 2rem; text-align: center; color: var(--text-muted); }
+  .empty .btn { margin-top: 1rem; display: inline-flex; }
 </style>
