@@ -1,11 +1,11 @@
 import http from 'http';
 import { URL } from 'url';
 import { config } from './config.js';
-import { GoogleMeetSession } from './meet.js';
+import { MeetingSession } from './meet.js';
 import { prewarmBrowserContext } from './browser.js';
 import { SessionStatusEvent, StartSessionPayload, StopSessionPayload } from './types.js';
 
-const sessions = new Map<string, GoogleMeetSession>();
+const sessions = new Map<string, MeetingSession>();
 const eventListeners = new Map<string, Set<(event: SessionStatusEvent) => void>>();
 
 function broadcastEvent(meetingId: string, event: SessionStatusEvent) {
@@ -87,6 +87,7 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify({
         status: 'ok',
         service: 'meeting-worker',
+        browser_mode: config.headless ? 'headless' : 'headed',
         active_sessions: sessions.size,
         max_capacity: config.maxConcurrentSessions,
         available_slots: Math.max(0, config.maxConcurrentSessions - sessions.size),
@@ -192,7 +193,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const session = new GoogleMeetSession(
+      const session = new MeetingSession(
         payload.meeting_id,
         payload.meeting_url,
         payload.bot_name,

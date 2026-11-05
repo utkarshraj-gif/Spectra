@@ -2,7 +2,6 @@
 name = "spectra-ai-service"
 version = "0.1.0"
 description = "Local Speech-to-Text Transcription Service for Spectra using Faster-Whisper"
-readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110.0",

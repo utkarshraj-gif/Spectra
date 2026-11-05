@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "login": "tsx src/login.ts",
     "dev": "tsx watch src/index.ts",
-    "test": "playwright test",
+    "test": "tsx src/auth.test.ts && tsx src/platforms/teams.test.ts && tsx src/platforms/google-meet.test.ts",
+    "test:meet": "tsx src/check-meet.ts",
     "test:audio": "tsx src/audio/verify-audio.ts"
   },
   "dependencies": {

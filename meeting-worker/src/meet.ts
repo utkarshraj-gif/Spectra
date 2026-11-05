@@ -1,5 +1,5 @@
 import { BrowserContext, Page } from 'playwright';
-import { createMeetingContext, cleanupProfileDir } from './browser.js';
+import { createMeetingContext } from './browser.js';
 import { config } from './config.js';
 import { MeetingState, SessionStatusEvent, PlatformAdapter } from './types.js';
 import { startMeetingAudioCapture, AudioCaptureSession, validateWavFile, LiveAudioStreamer } from './audio/index.js';
@@ -13,7 +13,6 @@ export class MeetingSession {
 
   private adapter: PlatformAdapter;
   private context: BrowserContext | null = null;
-  private profileDir: string | null = null;
   private page: Page | null = null;
   private state: MeetingState = 'INITIALIZING';
   private onEventCallback: (event: SessionStatusEvent) => void;
@@ -80,9 +79,8 @@ export class MeetingSession {
       }, config.maxSessionDurationMs);
 
       this.transitionTo('INITIALIZING', `Launching browser context for ${this.adapter.platform}`);
-      const { context, profileDir } = await createMeetingContext(this.meetingId);
+      const { context } = await createMeetingContext(this.meetingId);
       this.context = context;
-      this.profileDir = profileDir;
 
       const pages = this.context.pages();
       if (pages.length > 0 && pages[0].url() === 'about:blank') {
@@ -95,6 +93,13 @@ export class MeetingSession {
         throw new Error('Failed to initialize page in context');
       }
       page.setDefaultTimeout(config.navigationTimeoutMs);
+      if (this.adapter.platform === 'google_meet') {
+        page.on('response', response => {
+          if (response.url().includes('MeetingSpaceService/ResolveMeetingSpace')) {
+            console.log(`[MeetingSession] ${this.meetingId}: ResolveMeetingSpace HTTP ${response.status()}`);
+          }
+        });
+      }
 
       // 2. Navigate
       this.transitionTo('NAVIGATING', `Navigating to ${this.meetingUrl}`);
@@ -602,17 +607,9 @@ export class MeetingSession {
       if (this.context) {
         await this.context.close().catch(() => {});
       }
-      if (this.profileDir) {
-        cleanupProfileDir(this.profileDir);
-      }
     } finally {
       this.page = null;
       this.context = null;
-      this.profileDir = null;
     }
   }
 }
-
-// Backward-compatible alias
-export type GoogleMeetSession = MeetingSession;
-export const GoogleMeetSession = MeetingSession;

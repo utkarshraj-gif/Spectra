@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { MeetingPlatform, PlatformAdapter, MeetingState, ParticipantEventPayload, ChatMessagePayload } from '../types.js';
 import { ZoomAdapter } from './zoom.js';
 import { TeamsAdapter } from './teams.js';
+import { hasGoogleSession } from '../auth.js';
 
 export { ZoomAdapter } from './zoom.js';
 export { TeamsAdapter } from './teams.js';
@@ -90,24 +91,31 @@ export async function ensureCameraMuted(page: Page): Promise<boolean> {
 export class GoogleMeetAdapter implements PlatformAdapter {
   readonly platform: MeetingPlatform = 'google_meet';
 
+  private async rejectBlockedMeeting(page: Page, bodyText: string): Promise<void> {
+    if (/this meeting has already ended/i.test(bodyText)) {
+      throw new Error('Google Meet meeting has ended. Ask the host for an active meeting link.');
+    }
+    if (/you can['’]t join this (video )?call|no one can join a meeting unless invited/i.test(bodyText)) {
+      const sessionPresent = await hasGoogleSession(page.context());
+      const action = sessionPresent
+        ? 'Google session cookies are present. Ask the host to invite the bot account and allow it to join; if its session expired, run login again.'
+        : 'No Google session cookies are loaded. Run "npm --prefix meeting-worker run login" in a desktop terminal, sign in, and save before closing Chrome.';
+      throw new Error(`Google Meet rejected join request: You can't join this video call. ${action} Meeting access and organization policy must permit the bot; signing in does not override those controls.`);
+    }
+  }
+
   matches(url: string): boolean {
     return url.includes('meet.google.com') || /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/.test(url.trim());
   }
 
   normalizeUrl(rawUrl: string): string {
     let cleaned = rawUrl.trim();
+    const codeMatch = cleaned.match(/([a-z]{3}-[a-z]{4}-[a-z]{3})/i);
+    if (codeMatch) {
+      return `https://meet.google.com/${codeMatch[1].toLowerCase()}?hl=en`;
+    }
     if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
       cleaned = 'https://' + cleaned;
-    }
-    try {
-      const parsed = new URL(cleaned);
-      const segments = parsed.pathname.split('/').filter(Boolean);
-      const code = segments[segments.length - 1] || '';
-      if (code) {
-        return `https://meet.google.com/${code}?hl=en`;
-      }
-    } catch {
-      // fallback
     }
     return cleaned.includes('?') ? `${cleaned}&hl=en` : `${cleaned}?hl=en`;
   }
@@ -144,51 +152,80 @@ export class GoogleMeetAdapter implements PlatformAdapter {
   }
 
   async submitJoinRequest(page: Page, botName = 'Spectra'): Promise<void> {
-    // Fast check if already admitted
-    const inMeeting = await page
-      .locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [data-participant-id]')
-      .first()
-      .isVisible({ timeout: 100 })
-      .catch(() => false);
-    if (inMeeting) return;
+    const deadline = Date.now() + 10000;
+    const JOIN_SELECTORS = [
+      'button:has-text("Ask to join")',
+      'button:has-text("Join now")',
+      'button:has-text("Rejoin")',
+      'button:has-text("Switch here")',
+      'button:has-text("Join")',
+    ];
 
-    // Check if name input needs filling before clicking join CTA
-    const nameInput = page
-      .locator('input[aria-label*="name" i], input[type="text"]:not([aria-hidden="true"])')
-      .first();
-    if (await nameInput.isVisible({ timeout: 500 }).catch(() => false)) {
-      const val = await nameInput.inputValue().catch(() => '');
-      if (!val || val.trim().length === 0) {
-        await nameInput.fill(botName);
-        await page.keyboard.press('Enter').catch(() => {});
+    while (Date.now() < deadline) {
+      // 1. Fast check if already admitted
+      const inMeeting = await page
+        .locator('button[aria-label*="Leave call" i], button[aria-label*="Leave meeting" i], [data-participant-id]')
+        .first()
+        .isVisible({ timeout: 100 })
+        .catch(() => false);
+      if (inMeeting) return;
+
+      // 2. Dismiss media warning modal if present ("Continue without microphone and camera")
+      try {
+        const modalBtn = page.locator('button:has-text("Continue without"), [role="button"]:has-text("Continue without")').first();
+        if (await modalBtn.isVisible({ timeout: 200 }).catch(() => false)) {
+          await modalBtn.click().catch(() => {});
+          await page.waitForTimeout(200);
+        }
+      } catch {}
+
+      // 3. Check for meeting restriction / ejection screen
+      const bodyText = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+      await this.rejectBlockedMeeting(page, bodyText);
+
+      // 4. Fill guest name if input is visible
+      const nameInput = page
+        .locator('input[aria-label*="name" i], input[type="text"]:not([aria-hidden="true"])')
+        .first();
+      if (await nameInput.isVisible({ timeout: 300 }).catch(() => false)) {
+        const val = await nameInput.inputValue().catch(() => '');
+        if (!val || val.trim().length === 0) {
+          await nameInput.fill(botName);
+          await page.keyboard.press('Enter').catch(() => {});
+          await page.waitForTimeout(200);
+        }
       }
+
+      // 5. Look for clickable join CTA button
+      for (const sel of JOIN_SELECTORS) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 200 }).catch(() => false)) {
+          const isDisabled = await btn.evaluate((el: HTMLElement) => {
+            const b = el as HTMLButtonElement;
+            return b.disabled || b.getAttribute('aria-disabled') === 'true';
+          }).catch(() => false);
+
+          if (isDisabled && (await nameInput.isVisible().catch(() => false))) {
+            await nameInput.fill(botName);
+            await page.waitForTimeout(200);
+          }
+
+          if (!isDisabled) {
+            await ensureMicrophoneMuted(page).catch(() => {});
+            await btn.click({ timeout: 2000 });
+            return;
+          }
+        }
+      }
+
+      await page.waitForTimeout(400);
     }
 
-    // Unified reactive locator resolving immediately the moment ANY valid CTA appears
-    const primaryCta = page
-      .locator(
-        'button:has-text("Ask to join"), button:has-text("Join now"), button:has-text("Rejoin"), button:has-text("Switch here"), button:has-text("Join")'
-      )
-      .first();
+    // Final check for restriction screen if loop finishes
+    const finalBodyText = await page.evaluate(() => (document.body ? document.body.innerText : '')).catch(() => '');
+    await this.rejectBlockedMeeting(page, finalBodyText);
 
-    await primaryCta.waitFor({ state: 'visible', timeout: 15000 });
-
-    const isDisabled = await primaryCta.evaluate((el: HTMLElement) => {
-      const btn = el as HTMLButtonElement;
-      return btn.disabled || btn.getAttribute('aria-disabled') === 'true';
-    }).catch(() => false);
-
-    if (isDisabled) {
-      if (await nameInput.isVisible().catch(() => false)) {
-        await nameInput.fill(botName);
-        await page.waitForTimeout(200);
-      }
-    }
-
-    // Ensure microphone is definitely muted immediately prior to clicking Join
-    await ensureMicrophoneMuted(page).catch(() => {});
-
-    await primaryCta.click({ timeout: 2000 });
+    throw new Error('Google Meet pre-join interface did not render a clickable join button within 10 seconds.');
   }
 
   async waitForAdmission(
@@ -217,6 +254,7 @@ export class GoogleMeetAdapter implements PlatformAdapter {
 
     const GOOGLE_DENIED_INDICATORS = [
       'text="You can\'t join this call"',
+      'text="You can\'t join this video call"',
       'text="You were removed from the meeting"',
       'text="Someone denied your request to join"',
       'text="Your request to join was denied"',
@@ -269,7 +307,8 @@ export class GoogleMeetAdapter implements PlatformAdapter {
       for (const sel of GOOGLE_DENIED_INDICATORS) {
         const el = page.locator(sel).first();
         if (await el.isVisible({ timeout: 50 }).catch(() => false)) {
-          onStateChange('ADMISSION_DENIED', 'Admission to Google Meet was denied or room is full');
+          const reason = await el.innerText().catch(() => 'Access denied');
+          onStateChange('ADMISSION_DENIED', `Google Meet denied admission: ${reason}`);
           return false;
         }
       }

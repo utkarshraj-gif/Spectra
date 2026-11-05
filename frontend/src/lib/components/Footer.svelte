@@ -9,25 +9,12 @@
         <Sparkles size={20} />
         <span>Spectra</span>
       </div>
-      <div class="cols">
-        <div>
-          <h4>Product</h4>
-          <a href="/#how">How it works</a>
-          <a href="/#pricing">Pricing</a>
-          <a href="/dashboard">Dashboard</a>
-        </div>
-        <div>
-          <h4>Company</h4>
-          <a href="#">About</a>
-          <a href="#">Blog</a>
-          <a href="#">Contact</a>
-        </div>
-        <div>
-          <h4>Legal</h4>
-          <a href="#">Privacy</a>
-          <a href="#">Terms</a>
-        </div>
-      </div>
+      <nav class="links" aria-label="Product">
+        <h4>Product</h4>
+        <a href="/#how">How it works</a>
+        <a href="/#pricing">Pricing</a>
+        <a href="/dashboard">Dashboard</a>
+      </nav>
     </div>
     <div class="bottom">
       <p>© 2026 Spectra. All rights reserved.</p>
@@ -54,28 +41,23 @@
     font-weight: 700;
     font-size: 1.15rem;
   }
-  .cols {
-    display: flex;
-    gap: 4rem;
-  }
-  .cols h4 {
+  .links h4 {
     font-size: 0.85rem;
     margin-bottom: 0.75rem;
     color: var(--text-muted);
   }
-  .cols a {
+  .links a {
     display: block;
     font-size: 0.9rem;
     margin-bottom: 0.4rem;
     color: var(--text);
   }
-  .cols a:hover { opacity: 0.7; }
+  .links a:hover { opacity: 0.7; }
   .bottom {
     font-size: 0.85rem;
     color: var(--text-muted);
   }
   @media (max-width: 768px) {
     .top { flex-direction: column; }
-    .cols { gap: 2rem; }
   }
 </style>
