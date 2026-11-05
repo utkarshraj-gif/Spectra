@@ -54,3 +54,46 @@ export interface TranscriptSegment {
   model_name?: string | null;
   created_at?: string;
 }
+
+export interface ActionItem {
+  id: string;
+  text: string;
+  assignee?: string | null;
+  due_date?: string | null;
+  status: 'open' | 'in_progress' | 'done';
+  source_timestamp?: number | null; // seconds in transcript
+}
+
+export interface MeetingSummary {
+  meeting_id: string;
+  executive_summary: string;
+  key_decisions: string[];
+  action_items: ActionItem[];
+  topics?: string[];
+}
+
+export interface ParticipantStats {
+  name: string;
+  email?: string | null;
+  speak_time_seconds: number;
+  segment_count: number;
+}
+
+export interface CalendarEvent {
+  id: string;
+  summary: string;
+  description?: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  meet_link?: string | null;
+  meet_code?: string | null;
+  has_bot: boolean;
+  status?: string;
+}
+
+export type CalendarSyncState =
+  | 'connected'
+  | 'not_configured'
+  | 'unauthorized'
+  | 'error'
+  | 'loading';

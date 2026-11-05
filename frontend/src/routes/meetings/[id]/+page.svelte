@@ -1,36 +1,88 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { getMeeting, getTranscript, stopMeeting, subscribeMeetingEvents, type LiveMeetingEvent } from '$lib/api/client';
-  import type { Meeting, TranscriptSegment } from '$lib/types';
+  import {
+    getMeeting,
+    getTranscript,
+    stopMeeting,
+    getSummary,
+    getActionItems,
+    getParticipants,
+    updateActionItem
+  } from '$lib/api/client';
+  import type {
+    Meeting,
+    TranscriptSegment,
+    MeetingSummary,
+    ActionItem,
+    ParticipantStats
+  } from '$lib/types';
   import StatusBadge from '$lib/components/StatusBadge.svelte';
   import TranscriptViewer from '$lib/components/TranscriptViewer.svelte';
+  import SummaryViewer from '$lib/components/SummaryViewer.svelte';
+  import ActionItemsViewer from '$lib/components/ActionItemsViewer.svelte';
+  import ParticipantsViewer from '$lib/components/ParticipantsViewer.svelte';
 
   let meeting: Meeting | null = null;
   let segments: TranscriptSegment[] = [];
+  let summary: MeetingSummary | null = null;
+  let actionItems: ActionItem[] = [];
+  let participants: ParticipantStats[] = [];
   let loading = true;
   let error = '';
   let stopping = false;
-
+  let activeTab: 'transcript' | 'summary' | 'actions' | 'participants' = 'transcript';
   let pollInterval: ReturnType<typeof setInterval>;
-  let unsubscribeLive: (() => void) | null = null;
+  let transcriptEl: HTMLElement;
 
-  // Guaranteed to be string inside this route
   $: meetingId = $page.params.id as string;
 
   async function load() {
     if (!meetingId) return;
-
     try {
       meeting = await getMeeting(meetingId);
-      if (['completed', 'processing', 'recording', 'joined'].includes(meeting.status)) {
+      if (['completed', 'processing', 'recording'].includes(meeting.status)) {
         try {
-          const fresh = await getTranscript(meetingId);
-          if (fresh.length > 0) {
-            segments = fresh;
-          }
-        } catch {
-          // transcript may not be ready yet
+          const res = await getTranscript(meetingId);
+          segments = Array.isArray(res) ? res : (res as any).segments ?? [];
+        } catch { /* not ready */ }
+      }
+      if (meeting.status === 'completed') {
+        summary = await getSummary(meetingId);
+        actionItems = await getActionItems(meetingId);
+        participants = await getParticipants(meetingId);
+
+        // Fallback demo data so UI is visible before backend is ready
+        if (!summary) {
+          summary = {
+            meeting_id: meetingId,
+            executive_summary:
+              'The team reviewed Q4 priorities, confirmed API contracts, and assigned frontend polish to Mahi.',
+            key_decisions: [
+              'Ship Phase 5 UI this week',
+              'Keep bot camera and mic disabled by default'
+            ],
+            action_items: [],
+            topics: ['Roadmap', 'API', 'Frontend']
+          };
+        }
+        if (actionItems.length === 0) {
+          actionItems = [
+            {
+              id: '1',
+              text: 'Finish meeting detail tabs',
+              assignee: 'Mahi',
+              status: 'in_progress',
+              source_timestamp: 41
+            },
+            {
+              id: '2',
+              text: 'Wire calendar events on dashboard',
+              assignee: 'Mahi',
+              status: 'open',
+              source_timestamp: 28
+            }
+          ];
         }
       }
     } catch (e: any) {
@@ -40,22 +92,26 @@
     }
   }
 
-  function handleLiveEvent(event: LiveMeetingEvent) {
-    if (event.type === 'TRANSCRIPT_SEGMENT' && event.payload) {
-      const seg: TranscriptSegment = event.payload;
-      if (!segments.some((s) => s.id === seg.id)) {
-        segments = [...segments, seg];
-      }
-    } else if (event.type === 'STATE_CHANGE' && event.payload) {
-      meeting = { ...meeting, ...event.payload };
+  function jumpToTimestamp(seconds: number) {
+    activeTab = 'transcript';
+    // Let the tab render, then scroll
+    setTimeout(() => {
+      const el = document.querySelector(`[data-start="${Math.floor(seconds)}"]`);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+  }
+
+  async function handleToggle(item: ActionItem) {
+    actionItems = actionItems.map((a) => (a.id === item.id ? item : a));
+    try {
+      await updateActionItem(meetingId, item.id, { status: item.status });
+    } catch {
+      // Backend may not support PATCH yet – keep local state
     }
   }
 
   onMount(() => {
     load();
-    if (meetingId) {
-      unsubscribeLive = subscribeMeetingEvents(meetingId, handleLiveEvent);
-    }
     pollInterval = setInterval(async () => {
       if (!meeting) return;
       if (['completed', 'failed', 'cancelled'].includes(meeting.status)) {
@@ -68,7 +124,6 @@
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
-    if (unsubscribeLive) unsubscribeLive();
   });
 
   async function handleStop() {
@@ -112,104 +167,94 @@
       {/if}
     </div>
 
-    <div class="grid">
-      <div class="main-panel">
-        <h2>Live Transcript</h2>
-        <TranscriptViewer {segments} />
-      </div>
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class:active={activeTab === 'transcript'} on:click={() => (activeTab = 'transcript')}>
+        Transcript
+      </button>
+      <button class:active={activeTab === 'summary'} on:click={() => (activeTab = 'summary')}>
+        Executive Summary
+      </button>
+      <button class:active={activeTab === 'actions'} on:click={() => (activeTab = 'actions')}>
+        Action Items
+      </button>
+      <button class:active={activeTab === 'participants'} on:click={() => (activeTab = 'participants')}>
+        Participants
+      </button>
+    </div>
 
-      <div class="side-panel">
-        <h3>Details</h3>
-        <ul>
-          <li><strong>Platform:</strong> {meeting.platform || 'Google Meet'}</li>
-          <li><strong>Status:</strong> {meeting.status}</li>
-          <li><strong>Created:</strong> {new Date(meeting.created_at).toLocaleString()}</li>
-          {#if meeting.started_at}
-            <li><strong>Started:</strong> {new Date(meeting.started_at).toLocaleString()}</li>
-          {/if}
-          {#if meeting.ended_at}
-            <li><strong>Ended:</strong> {new Date(meeting.ended_at).toLocaleString()}</li>
-          {/if}
-        </ul>
-      </div>
+    <div class="tab-panel card">
+      {#if activeTab === 'transcript'}
+        <div bind:this={transcriptEl}>
+          <TranscriptViewer {segments} />
+        </div>
+      {:else if activeTab === 'summary'}
+        <SummaryViewer {summary} onJumpToTimestamp={jumpToTimestamp} />
+      {:else if activeTab === 'actions'}
+        <ActionItemsViewer items={actionItems} onToggle={handleToggle} onJump={jumpToTimestamp} />
+      {:else}
+        <ParticipantsViewer {participants} />
+      {/if}
     </div>
   </div>
 {/if}
 
 <style>
   .back-link {
-    color: #2563eb;
+    color: var(--accent);
     text-decoration: none;
     font-size: 0.875rem;
-    font-weight: 500;
   }
   .header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
     margin: 1rem 0 1.5rem;
+    gap: 1rem;
   }
-  h1 {
-    color: var(--text, #131316);
-    margin: 0.25rem 0;
-  }
-  h2, h3 {
-    color: var(--text, #131316);
-    margin-bottom: 0.75rem;
-  }
-  .url {
-    color: var(--text-muted, #6b6b76);
-    font-size: 0.9rem;
-    word-break: break-all;
-  }
-  .actions {
-    margin-bottom: 1.5rem;
-  }
+  h1 { margin: 0.25rem 0; }
+  .url { color: var(--text-muted); font-size: 0.9rem; word-break: break-all; }
+  .actions { margin-bottom: 1.25rem; }
   .btn.danger {
-    background: #dc2626;
-    color: #ffffff;
+    background: #7f1d1d;
+    color: #fca5a5;
     border: none;
     padding: 0.6rem 1.2rem;
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
     font-weight: 600;
-    transition: background 0.15s;
   }
-  .btn.danger:hover {
-    background: #b91c1c;
+  .tabs {
+    display: flex;
+    gap: 0.35rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
   }
-  .grid {
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: 1.5rem;
+  .tabs button {
+    background: var(--bg-muted);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.9rem;
   }
-  @media (max-width: 768px) {
-    .grid { grid-template-columns: 1fr; }
+  .tabs button.active {
+    background: var(--primary);
+    color: var(--primary-fg);
+    border-color: var(--primary);
   }
-  .main-panel, .side-panel {
-    background: var(--bg-elevated, #ffffff);
-    border: 1px solid var(--border, #e2e2e8);
-    border-radius: 12px;
-    box-shadow: var(--card-shadow, 0 4px 24px rgba(0, 0, 0, 0.06));
-    padding: 1.5rem;
-    color: var(--text, #131316);
+  .tab-panel {
+    padding: 1.25rem;
+    min-height: 280px;
   }
   .error {
-    background: #fee2e2;
-    color: #b91c1c;
-    border: 1px solid #fca5a5;
+    background: #7f1d1d;
+    color: #fca5a5;
     padding: 0.75rem 1rem;
-    border-radius: 6px;
+    border-radius: 8px;
     margin-bottom: 1rem;
   }
-  .muted {
-    color: var(--text-muted, #6b6b76);
-  }
-  ul {
-    padding-left: 1.25rem;
-    color: var(--text, #131316);
-  }
-  li {
-    margin-bottom: 0.5rem;
-  }
+  .muted { color: var(--text-muted); }
 </style>
