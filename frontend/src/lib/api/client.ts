@@ -1,4 +1,4 @@
-import type { Meeting, TranscriptSegment, CalendarEvent } from '$lib/types';
+import type { Meeting, TranscriptSegment, CalendarEvent, UserPreferences } from '$lib/types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
@@ -170,8 +170,29 @@ export async function joinCalendarEvent(eventId: string) {
   );
 }
 
-/** Optional: start Google OAuth (backend may expose this) */
+// ---------- User preferences (backend optional) ----------
+
+export async function fetchPreferences(): Promise<UserPreferences | null> {
+  try {
+    return await apiRequest<UserPreferences>('/api/v1/users/me/preferences');
+  } catch {
+    return null;
+  }
+}
+
+export async function savePreferencesApi(prefs: UserPreferences): Promise<boolean> {
+  try {
+    await apiRequest('/api/v1/users/me/preferences', {
+      method: 'PUT',
+      body: JSON.stringify(prefs)
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+/** Current backend: GET /api/auth/google/login */
 export function getGoogleConnectUrl() {
   const base = import.meta.env.VITE_API_URL || 'http://localhost:8080';
-  return `${base}/api/v1/auth/google`;
+  return `${base}/api/auth/google/login`;
 }

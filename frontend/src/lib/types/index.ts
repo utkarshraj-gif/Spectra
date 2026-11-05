@@ -97,3 +97,17 @@ export type CalendarSyncState =
   | 'unauthorized'
   | 'error'
   | 'loading';
+
+  export interface UserPreferences {
+  bot_name: string;
+  auto_join_calendar: boolean;
+  transcription_language: string;
+  notify_on_complete: boolean;
+}
+
+export const DEFAULT_PREFERENCES: UserPreferences = {
+  bot_name: 'Spectra Assistant',
+  auto_join_calendar: false,
+  transcription_language: 'en',
+  notify_on_complete: true
+};
