@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
   import {
     listMeetings,
     listCalendarEvents,
@@ -38,6 +39,12 @@
     dateFrom: '',
     dateTo: ''
   };
+
+  $: applyUrlQuery($page.url.searchParams.get('q'));
+
+  function applyUrlQuery(q: string | null) {
+    filters = { ...filters, query: q ?? '' };
+  }
 
   $: filtered = filterMeetings(meetings, filters, transcriptIndex);
 

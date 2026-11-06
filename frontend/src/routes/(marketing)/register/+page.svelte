@@ -1,29 +1,37 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
+  import { onboarding } from '$lib/stores/onboarding';
+
+  let name = '';
   let email = '';
   let password = '';
 
-  function handleLogin() {
-    console.log('Login attempt:', email);
+  function handleRegister() {
+    onboarding.start({ name: name.trim(), email: email.trim() });
+    goto('/onboarding');
   }
 </script>
 
 <div class="auth-wrapper">
   <div class="auth-card card">
-    <h2>Welcome back</h2>
-    <p class="subtitle">Log in to your Spectra account</p>
+    <h2>Create your account</h2>
+    <p class="subtitle">Start capturing meetings with Spectra</p>
 
-    <form on:submit|preventDefault={handleLogin}>
+    <form on:submit|preventDefault={handleRegister}>
+      <label for="name">Full Name</label>
+      <input id="name" type="text" bind:value={name} required placeholder="Your name" />
+
       <label for="email">Email</label>
       <input id="email" type="email" bind:value={email} required placeholder="you@company.com" />
 
       <label for="password">Password</label>
       <input id="password" type="password" bind:value={password} required placeholder="••••••••" />
 
-      <button type="submit" class="btn btn-primary full">Sign In</button>
+      <button type="submit" class="btn btn-primary full">Sign Up</button>
     </form>
 
     <p class="footer-link">
-      Don't have an account? <a href="/register">Sign up</a>
+      Already have an account? <a href="/login">Log in</a>
     </p>
   </div>
 </div>

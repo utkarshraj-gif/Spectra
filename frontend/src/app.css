@@ -103,3 +103,127 @@ button {
   border-radius: 16px;
   box-shadow: var(--card-shadow);
 }
+
+/* Onboarding (full-screen setup pages) */
+.ob-title {
+  font-size: 24px;
+  font-weight: 500;
+  color: #f4f4f5;
+  letter-spacing: -0.01em;
+}
+
+.ob-sub {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #b4b4b8;
+}
+
+.ob-label {
+  display: block;
+  margin: 40px 0 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #ececec;
+}
+
+.ob-select {
+  position: relative;
+  color: #9a9a9f;
+}
+
+.ob-select select {
+  width: 100%;
+  height: 40px;
+  appearance: none;
+  padding: 0 36px 0 14px;
+  border-radius: 4px;
+  border: 1px solid #26262a;
+  background: #19191c;
+  color: #e4e4e7;
+  font-family: inherit;
+  font-size: 13.5px;
+}
+
+.ob-select select:focus {
+  outline: none;
+  border-color: #6b2bb5;
+}
+
+.ob-select svg {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  pointer-events: none;
+}
+
+.ob-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ob-chip {
+  height: 34px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 4px;
+  border: 1px solid #2c2c30;
+  background: #19191c;
+  color: #d4d4d8;
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.ob-chip:hover {
+  border-color: #45454b;
+}
+
+.ob-chip.selected {
+  border-color: #9013fe;
+  background: rgba(144, 19, 254, 0.14);
+  color: #c895ff;
+}
+
+.ob-primary {
+  margin-top: 40px;
+  height: 38px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  border-radius: 4px;
+  background: #9013fe;
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.ob-primary:hover {
+  background: #9d2bff;
+}
+
+.ob-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ob-secondary {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 4px;
+  border: 1px solid #2c2c30;
+  background: #1c1c1f;
+  color: #e4e4e7;
+  font-family: inherit;
+  font-size: 13.5px;
+}
+
+.ob-secondary:hover {
+  background: #232327;
+}

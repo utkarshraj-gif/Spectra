@@ -1,33 +1,38 @@
 <script lang="ts">
-  let name = '';
+  import { goto } from '$app/navigation';
+  import { onboarding } from '$lib/stores/onboarding';
+
   let email = '';
   let password = '';
 
-  function handleRegister() {
-    console.log('Register attempt:', { name, email });
+  function handleLogin() {
+    const addr = email.trim();
+    if (addr !== $onboarding.profile.email) {
+      const local = addr.split('@')[0] ?? '';
+      const name = local.split(/[._-]/)[0] ?? local;
+      onboarding.patch({ profile: { name: name.charAt(0).toUpperCase() + name.slice(1), email: addr } });
+    }
+    goto('/home');
   }
 </script>
 
 <div class="auth-wrapper">
   <div class="auth-card card">
-    <h2>Create your account</h2>
-    <p class="subtitle">Start capturing meetings with Spectra</p>
+    <h2>Welcome back</h2>
+    <p class="subtitle">Log in to your Spectra account</p>
 
-    <form on:submit|preventDefault={handleRegister}>
-      <label for="name">Full Name</label>
-      <input id="name" type="text" bind:value={name} required placeholder="Your name" />
-
+    <form on:submit|preventDefault={handleLogin}>
       <label for="email">Email</label>
       <input id="email" type="email" bind:value={email} required placeholder="you@company.com" />
 
       <label for="password">Password</label>
       <input id="password" type="password" bind:value={password} required placeholder="••••••••" />
 
-      <button type="submit" class="btn btn-primary full">Sign Up</button>
+      <button type="submit" class="btn btn-primary full">Sign In</button>
     </form>
 
     <p class="footer-link">
-      Already have an account? <a href="/login">Log in</a>
+      Don't have an account? <a href="/register">Sign up</a>
     </p>
   </div>
 </div>
